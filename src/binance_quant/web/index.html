@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>只想玩天使的量化</title>
+  <link rel="icon" href="assets/angel-quant-icon.png" />
+  <link rel="stylesheet" href="styles.css?v=0.10.0" />
+  <link rel="stylesheet" href="workspace.css?v=0.10.0" />
+</head>
+<body>
+  <section class="entry-screen" id="entryScreen">
+    <img class="entry-background" src="assets/fearless-entry.png" alt="铜像女孩面向金融区建筑" />
+    <div class="entry-shade"></div>
+    <div class="entry-brand">
+      <img src="assets/angel-quant-icon.png" alt="" />
+      <div>
+        <p>ANGEL QUANT</p>
+        <h1>只想玩天使的量化</h1>
+      </div>
+    </div>
+    <form class="login-panel" id="loginForm">
+      <div class="login-heading">
+        <span class="eyebrow">模拟账户</span>
+        <h2>连接 Binance Demo</h2>
+        <p>密钥仅保留在本次运行内存中。</p>
+      </div>
+      <label>
+        <span>API Key</span>
+        <input id="entryApiKey" type="text" autocomplete="off" spellcheck="false" placeholder="USD-M Demo API Key" />
+      </label>
+      <label>
+        <span>API Secret</span>
+        <input id="entryApiSecret" type="password" autocomplete="new-password" spellcheck="false" placeholder="USD-M Demo API Secret" />
+      </label>
+      <button class="button primary wide" id="entryLoginButton" type="submit">连接并进入</button>
+      <div class="entry-actions">
+        <span id="entryStatus">也可以先验证策略，不需要API。</span>
+        <button class="text-button" id="skipLoginButton" type="button">跳过登录 <span aria-hidden="true">→</span></button>
+      </div>
+    </form>
+  </section>
+
+  <div class="app-shell is-hidden" id="appShell">
+    <aside class="sidebar">
+      <button class="brand-button" data-view="home" type="button" title="返回模式大厅">
+        <img src="assets/angel-quant-icon.png" alt="" />
+        <span><strong>只想玩天使</strong><small>研究终端</small></span>
+      </button>
+      <nav class="main-nav" aria-label="主要导航">
+        <button class="nav-item active" data-view="home" type="button"><span>总览</span></button>
+        <button class="nav-item" data-view="daily" type="button"><span>当日策略</span><em>新</em></button>
+        <button class="nav-item" data-view="agent" type="button"><span>智能盯盘</span></button>
+        <button class="nav-item" data-view="simulation" type="button"><span>模拟盘</span></button>
+        <button class="nav-item" data-view="validation" type="button"><span>策略验证</span></button>
+        <button class="nav-item" data-view="live" type="button"><span>实盘账户</span></button>
+        <button class="nav-item" data-view="strategies" type="button"><span>策略库</span></button>
+        <button class="nav-item" data-view="settings" type="button"><span>设置</span></button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="connection-chip" id="connectionChip"><span></span><strong>访客模式</strong></div>
+        <button class="quiet-button" id="exitAccountButton" type="button">返回登录</button>
+        <small>LOCAL DESKTOP · v0.10.0</small>
+      </div>
+    </aside>
+
+    <main class="workspace" id="workspace">
+      <header class="topbar">
+        <div>
+          <p class="breadcrumb" id="breadcrumb">工作台 / 总览</p>
+          <h2 id="viewTitle">今日概览</h2>
+        </div>
+        <div class="topbar-actions">
+          <div class="engine-state"><span id="engineDot"></span><div><small>研究引擎</small><strong id="engineLabel">检测中</strong></div></div>
+          <button class="button secondary compact" id="newPortfolioTop" type="button">＋ 新建组合</button>
+        </div>
+      </header>
+
+      <div class="view active" id="homeView">
+        <section class="welcome-band overview-band">
+          <div>
+            <p class="eyebrow">WORKSPACE</p>
+            <h3>研究与运行总览</h3>
+          </div>
+          <div class="welcome-stats">
+            <div><span id="strategyCount">0</span><small>可用策略</small></div>
+            <div><span id="portfolioCount">0</span><small>已存组合</small></div>
+            <div><span id="agentSignalCount">0</span><small>智能信号</small></div>
+          </div>
+        </section>
+        <section class="mode-list" aria-label="运行模式">
+          <button class="mode-row featured" data-open-view="daily" type="button">
+            <span class="mode-index">01</span>
+            <span class="mode-content"><strong>当日策略</strong><small>SNDK · MRVL · SOXL · NBIS · MiniMax</small></span>
+            <span class="mode-state ready">已接入</span><span class="mode-arrow">→</span>
+          </button>
+          <button class="mode-row" data-open-view="agent" type="button">
+            <span class="mode-index">02</span>
+            <span class="mode-content"><strong>智能盯盘</strong><small>实时行情 · 规则/模型 · 飞书推送</small></span>
+            <span class="mode-state ready">可用</span><span class="mode-arrow">→</span>
+          </button>
+          <button class="mode-row" data-open-view="simulation" type="button">
+            <span class="mode-index">03</span>
+            <span class="mode-content"><strong>模拟盘</strong><small>独立钱包 · 多项目并发</small></span>
+            <span class="mode-state ready">可用</span><span class="mode-arrow">→</span>
+          </button>
+          <button class="mode-row" data-open-view="validation" type="button">
+            <span class="mode-index">04</span>
+            <span class="mode-content"><strong>策略验证</strong><small>历史K线 · 资金曲线 · 交易统计</small></span>
+            <span class="mode-state ready">可用</span><span class="mode-arrow">→</span>
+          </button>
+          <button class="mode-row" data-open-view="live" type="button">
+            <span class="mode-index">05</span>
+            <span class="mode-content"><strong>实盘账户</strong><small>只读连接 · 自动下单锁定</small></span>
+            <span class="mode-state locked">锁定</span><span class="mode-arrow">→</span>
+          </button>
+        </section>
+        <section class="portfolio-strip">
+          <div class="section-title"><div><p class="eyebrow">PORTFOLIOS</p><h3>最近的项目组合</h3></div><button class="text-button" data-open-view="validation" type="button">进入策略验证 →</button></div>
+          <div class="portfolio-list" id="recentPortfolioList"></div>
+        </section>
+      </div>
+
+      <div class="view" id="dailyView">
+        <div id="dailyOverview">
+          <section class="overview-heading"><div><h3>标的策略</h3><p>选择卡片查看判断依据</p></div><div class="overview-actions"><button class="button secondary" id="refreshAllDaily" type="button">刷新全部</button><button class="button primary" id="addDailyAsset" type="button">＋ 添加标的</button></div></section>
+          <div id="dailyCardGrid" class="daily-card-grid"></div>
+        </div>
+        <div id="dailyDetail" class="is-hidden">
+        <button class="text-button back-link" id="backDaily" type="button">← 全部标的</button>
+        <section class="daily-toolbar">
+          <div class="daily-asset-picker" id="dailyAssetPicker" role="listbox" aria-label="选择交易标的">
+            <button class="active" data-daily-asset="SNDK" type="button">SNDK<small>闪迪</small></button>
+            <button data-daily-asset="MRVL" type="button">MRVL<small>迈威尔</small></button>
+            <button data-daily-asset="SOXL" type="button">SOXL<small>3倍半导体</small></button>
+            <button data-daily-asset="NBIS" type="button">NBIS<small>Nebius</small></button>
+            <button data-daily-asset="MINIMAX" type="button">0100.HK<small>MiniMax</small></button>
+          </div>
+          <div class="daily-refresh-block">
+            <div><span id="dailySession">等待生成</span><small id="dailyAsOf">尚无数据</small></div>
+            <button class="button primary" id="refreshDailyStrategy" type="button">生成策略</button>
+          </div>
+        </section>
+
+        <section class="daily-market-strip" aria-live="polite">
+          <div class="daily-quote"><span id="dailyAssetName">SNDK · 闪迪</span><strong id="dailyPrice">--</strong><em id="dailyChange">--</em></div>
+          <div><span>市场</span><strong id="dailyMarket">NASDAQ · USD</strong></div>
+          <div><span>数据完整度</span><strong id="dailyCompleteness">--</strong></div>
+          <div><span>入场时机</span><strong id="dailyTiming">--</strong></div>
+        </section>
+
+        <section class="daily-summary-section">
+          <div class="section-title compact"><h3>决策摘要</h3><span class="section-note">未验证数据不参与判断</span></div>
+          <div class="daily-summary-grid" id="dailySummaryGrid">
+            <article><span>重大消息 / 今晚事件</span><strong>等待生成</strong></article>
+            <article><span>期权理论隐含区间</span><strong>--</strong></article>
+            <article><span>期权核心博弈区间</span><strong>--</strong></article>
+            <article><span>期权资金方向</span><strong>--</strong></article>
+            <article><span>主要 Call / Put Strike</span><strong>--</strong></article>
+            <article><span>上方流动性池</span><strong>--</strong></article>
+            <article><span>下方流动性池</span><strong>--</strong></article>
+            <article><span>预计优先插针</span><strong>--</strong></article>
+            <article><span>板块 / 标的相对强弱</span><strong>--</strong></article>
+            <article><span>VIX / 系统性风险</span><strong>--</strong></article>
+          </div>
+        </section>
+
+        <section class="daily-decision is-empty" id="dailyDecision">
+          <header>
+            <div><span>执行策略</span><small id="dailyConfidence">等待最新数据</small></div>
+            <span class="daily-freshness" id="dailyFreshness">未生成</span>
+          </header>
+          <div class="daily-decision-body">
+            <div class="daily-direction" id="dailyDirection"><small>方向</small><strong>--</strong><span>选择标的后生成</span></div>
+            <div class="daily-entry"><span>入场区间</span><strong id="dailyEntry">--</strong><small id="dailyCondition">入场为条件触发，不是市价指令</small></div>
+            <div class="daily-level"><span>TP1</span><strong id="dailyTp1">--</strong><small>首次减仓</small></div>
+            <div class="daily-level"><span>TP2</span><strong id="dailyTp2">--</strong><small>主目标</small></div>
+            <div class="daily-level"><span>TP3</span><strong id="dailyTp3">--</strong><small>突破后启用</small></div>
+            <div class="daily-level stop"><span>SL</span><strong id="dailySl">--</strong><small>结构失效</small></div>
+          </div>
+        </section>
+
+        <details class="daily-evidence">
+          <summary><span>数据来源与计算说明</span><small>展开</small></summary>
+          <div class="daily-evidence-body">
+            <div><h4>数据来源</h4><div id="dailySources">生成后显示每项数据的来源和时间。</div></div>
+            <div><h4>限制与风险</h4><ul id="dailyWarnings"><li>Expected Move 是概率区间，不是价格保证。</li><li>本功能只生成研究策略，不会自动下单。</li></ul></div>
+            <div class="daily-module-detail"><h4>模块证据</h4><div id="dailyEvidenceModules">暂无。</div></div>
+          </div>
+        </details>
+        </div>
+      </div>
+
+      <div class="view" id="agentView">
+        <section class="agent-toolbar">
+          <div class="agent-run-state"><span class="status-light" id="agentRunLight"></span><div><small>AGENT MONITOR</small><strong id="agentRunLabel">未启动</strong></div></div>
+          <div class="agent-quick-controls">
+            <label><span>市场</span><select id="agentQuickMarket"></select></label>
+            <label><span>标的</span><select id="agentQuickSymbol"></select></label>
+            <label><span>周期</span><select id="agentQuickTimeframe"><option>1m</option><option>3m</option><option>5m</option><option selected>15m</option><option>30m</option><option>1h</option><option>2h</option><option>4h</option><option>6h</option><option>12h</option><option>1d</option></select></label>
+          </div>
+          <div class="agent-toolbar-actions">
+            <button class="icon-button" id="agentSettingsButton" type="button" title="智能体设置" aria-label="智能体设置">⚙</button>
+            <button class="button secondary" id="analyzeNowButton" type="button">立即分析</button>
+            <button class="button primary" id="toggleAgentButton" type="button">启动盯盘</button>
+          </div>
+        </section>
+        <datalist id="agentSymbolCatalog"></datalist>
+
+        <section class="agent-layout">
+          <div class="agent-main-column">
+            <section class="market-console">
+              <header class="console-heading">
+                <div><p class="eyebrow" id="agentMarketScope">BTCUSDT · 15m</p><div class="market-price-line"><h3 id="agentPrice">--</h3><span id="agentChange">--</span></div></div>
+                <div class="market-tags"><span id="agentTrend">趋势 --</span><span id="agentRegime">环境 --</span><span id="agentCandleTime">等待行情</span></div>
+              </header>
+              <canvas id="agentKlineChart" width="960" height="380"></canvas>
+              <div class="indicator-ribbon" id="agentIndicators">
+                <div><span>EMA 20</span><strong>--</strong></div><div><span>EMA 60</span><strong>--</strong></div><div><span>RSI 14</span><strong>--</strong></div><div><span>ATR</span><strong>--</strong></div><div><span>量比</span><strong>--</strong></div>
+              </div>
+            </section>
+
+            <section class="signal-console" id="agentSignalPanel">
+              <header class="panel-title"><h4>最新策略</h4><span id="agentModelLabel">规则共识</span></header>
+              <div class="signal-body">
+                <div class="signal-verdict wait" id="agentVerdict"><small>方向</small><strong>WAIT</strong><span>等待首次分析</span></div>
+                <div class="signal-levels" id="agentLevels"><div><span>入场区间</span><strong>--</strong></div><div><span>止损</span><strong>--</strong></div><div><span>止盈</span><strong>--</strong></div><div><span>盈亏比</span><strong>--</strong></div><div><span>建议保证金</span><strong>--</strong></div></div>
+                <div class="signal-rationale"><p id="agentReason">智能体会在已收盘 K 线上生成结构化策略。</p><small id="agentInvalidation">--</small></div>
+              </div>
+            </section>
+
+            <section class="skill-console">
+              <header class="panel-title"><h4>Skill 证据</h4><span>同一指标快照 · 独立投票</span></header>
+              <div class="skill-assessment-list" id="agentSkillAssessments"><div class="empty-state">等待首次分析</div></div>
+            </section>
+          </div>
+
+          <aside class="agent-side-column">
+            <section class="watch-console">
+              <header class="panel-title"><h4>监控队列</h4><span id="agentWatchCount">1 个</span></header>
+              <div class="watch-list" id="agentWatchList"></div>
+            </section>
+            <section class="agent-meta-console">
+              <header class="panel-title"><h4>运行配置</h4><span id="agentPushState">飞书未配置</span></header>
+              <dl id="agentMeta"><div><dt>判断引擎</dt><dd>规则共识</dd></div><div><dt>风险阈值</dt><dd>60%</dd></div><div><dt>最小盈亏比</dt><dd>1.5</dd></div><div><dt>单笔风险</dt><dd>1%</dd></div></dl>
+            </section>
+            <pre class="agent-log" id="agentLog">暂无运行记录</pre>
+          </aside>
+        </section>
+
+        <section class="agent-history-console">
+          <header class="panel-title"><h4>信号历史</h4><span>最近 50 条</span></header>
+          <div class="table-wrap"><table><thead><tr><th>时间</th><th>标的</th><th>周期</th><th>方向</th><th>置信度</th><th>风控</th><th>来源</th><th>飞书</th></tr></thead><tbody id="agentHistoryRows"><tr><td colspan="8">暂无信号</td></tr></tbody></table></div>
+        </section>
+      </div>
+
+      <div class="view" id="simulationView">
+        <section class="page-intro compact-intro">
+          <div><h3>模拟盘项目</h3><p>公开行情 · 独立模拟钱包 · 不连接真实资金</p></div>
+          <div class="safety-seal"><span>DRY</span><strong>模拟资金</strong><small>真实下单不可用</small></div>
+        </section>
+        <section class="work-grid">
+          <div class="main-column">
+            <div class="section-title"><div><p class="eyebrow">STEP 1</p><h3>选择策略</h3></div><button class="text-button" data-open-view="strategies" type="button">查看策略库 →</button></div>
+            <div class="strategy-picker" id="simulationStrategyPicker"></div>
+            <div class="action-band">
+              <div><strong id="simulationSelection">尚未选择策略</strong><span>选择后配置项目数量、预算与运行时间。</span></div>
+              <button class="button primary" id="configureSimulation" type="button" disabled>配置项目组合 →</button>
+            </div>
+          </div>
+          <aside class="status-column">
+            <div class="status-panel">
+              <div class="status-heading"><span class="status-light" id="dryRunLight"></span><div><small>运行状态</small><strong id="dryRunStatus">未启动</strong></div></div>
+              <dl><div><dt>组合</dt><dd id="dryRunPortfolio">--</dd></div><div><dt>自动停止</dt><dd id="dryRunDeadline">--</dd></div></dl>
+              <button class="button danger wide" id="stopDryRunButton" type="button" disabled>停止模拟实测</button>
+            </div>
+            <pre class="run-log" id="dryRunLog">暂无运行记录</pre>
+          </aside>
+        </section>
+      </div>
+
+      <div class="view" id="validationView">
+        <section class="page-intro compact-intro">
+          <div><h3>组合历史验证</h3><p>共享资金线 · 手续费 · 多空与退出统计</p></div>
+          <div class="market-switch" role="tablist"><button class="active" type="button">加密永续</button><button id="stockMarketButton" type="button">股票永续 <span>SNDK验证</span></button></div>
+        </section>
+        <section id="validationSetup">
+          <div class="section-title"><div><p class="eyebrow">STEP 1</p><h3>选择要验证的策略</h3></div><span class="section-note">每个项目运行同一策略实例，参数可独立扩展</span></div>
+          <div class="strategy-picker spacious" id="validationStrategyPicker"></div>
+          <div class="action-band">
+            <div><strong id="validationSelection">尚未选择策略</strong><span>下一步将创建1至12个独立项目。</span></div>
+            <button class="button primary" id="configureValidation" type="button" disabled>配置项目组合 →</button>
+          </div>
+        </section>
+        <section class="results is-hidden" id="backtestResults">
+          <div class="result-head"><div><p class="eyebrow">BACKTEST COMPLETE</p><h3 id="resultName">组合回测结果</h3><span id="resultScope">--</span></div><button class="button secondary compact" id="newValidationButton" type="button">重新配置</button></div>
+          <div class="metric-ribbon" id="metricRibbon"></div>
+          <div class="result-grid">
+            <section class="chart-panel"><div class="panel-title"><h4>资金曲线</h4><span id="chartCaption">每日结算</span></div><canvas id="equityChart" width="900" height="320"></canvas></section>
+            <section class="direction-panel"><div class="panel-title"><h4>方向表现</h4><span>扣除手续费后</span></div><div id="directionStats"></div></section>
+          </div>
+          <section class="table-panel"><div class="panel-title"><h4>项目表现</h4><span id="feeSummary">--</span></div><div class="table-wrap"><table><thead><tr><th>标的</th><th>交易</th><th>胜率</th><th>收益</th><th>净利润</th><th>PF</th><th>最大回撤</th></tr></thead><tbody id="pairResults"></tbody></table></div></section>
+          <section class="exit-panel"><div class="panel-title"><h4>退出原因</h4><span>判断利润来自哪里</span></div><div id="exitReasons"></div></section>
+        </section>
+      </div>
+
+      <div class="view" id="liveView">
+        <section class="live-lock-band"><div class="lock-symbol">!</div><div><h3>真实账户只读连接</h3><p>可核对余额和持仓；自动下单仍锁定。</p></div><span>EXECUTION LOCKED</span></section>
+        <section class="live-grid">
+          <form class="live-form" id="liveConnectForm">
+            <div class="section-title"><div><p class="eyebrow">BINANCE USD-M</p><h3>输入真实网API</h3></div></div>
+            <label><span>API Key</span><input id="liveApiKey" type="text" autocomplete="off" spellcheck="false" /></label>
+            <label><span>API Secret</span><input id="liveApiSecret" type="password" autocomplete="new-password" spellcheck="false" /></label>
+            <button class="button secondary wide" type="submit">只读连接账户</button>
+            <p class="form-footnote">建议使用仅具读取权限的独立API。不要在当前版本授予提现权限。</p>
+          </form>
+          <section class="account-panel">
+            <div class="panel-title"><h4>账户概览</h4><span id="liveConnectionLabel">未连接</span></div>
+            <div class="account-metrics" id="liveMetrics"><div><span>钱包余额</span><strong>--</strong></div><div><span>可用余额</span><strong>--</strong></div><div><span>未实现盈亏</span><strong>--</strong></div><div><span>保证金占用</span><strong>--</strong></div></div>
+          </section>
+        </section>
+      </div>
+
+      <div class="view" id="strategiesView">
+        <section class="page-intro strategy-intro"><div><h3>策略库</h3></div><button class="button secondary compact" id="openStrategyFolder" type="button">打开策略目录</button></section>
+        <div class="strategy-library" id="strategyLibrary"></div>
+      </div>
+      <div class="view" id="settingsView">
+        <section class="overview-heading"><div><h3>外观设置</h3></div></section>
+        <div class="appearance-grid">
+          <section class="appearance-card"><h3>应用图标</h3><img id="iconPreview" class="icon-preview" src="assets/custom-icon.jpg" alt="应用图标预览"><p>界面与运行时 Dock 图标同步更新</p><button type="button" id="iconChoose" class="button primary upload-label">选择图标</button><input type="file" id="iconUpload" accept="image/png,image/jpeg" hidden><button class="text-button" data-reset-image="icon" type="button">恢复默认</button></section>
+          <section class="appearance-card"><h3>大厅背景</h3><img id="backgroundPreview" class="background-preview" src="assets/lobby.jpg" alt="大厅背景预览"><p>支持 JPG、PNG，最大 8 MB</p><button type="button" id="backgroundChoose" class="button primary upload-label">选择背景</button><input type="file" id="backgroundUpload" accept="image/png,image/jpeg" hidden><button class="text-button" data-reset-image="background" type="button">恢复默认</button></section>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <dialog class="portfolio-dialog" id="portfolioDialog">
+    <form method="dialog" class="dialog-shell" id="portfolioForm">
+      <header class="dialog-header">
+        <div><p class="eyebrow" id="dialogModeLabel">STRATEGY VALIDATION</p><h2>新建项目组合</h2><span id="dialogStrategyName">策略1</span></div>
+        <button class="dialog-close" id="closePortfolioDialog" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <section class="portfolio-basics">
+          <label><span>组合名称</span><input id="portfolioName" type="text" value="核心项目组合" maxlength="60" /></label>
+          <label><span>组合本金</span><div class="input-unit"><input id="portfolioCapital" type="number" min="100" step="100" value="5000" /><em>USDT</em></div></label>
+          <label><span>运行时间</span><div class="input-unit"><input id="portfolioDays" type="number" min="2" max="365" value="30" /><em>天</em></div></label>
+          <label><span>项目数量</span><div class="input-unit"><input id="projectCount" type="number" min="1" max="12" value="5" /><em>个</em></div></label>
+          <label><span>最大并发</span><div class="input-unit"><input id="maxConcurrent" type="number" min="1" value="5" /><em>仓</em></div></label>
+          <label><span>回撤警戒线</span><div class="input-unit"><input id="accountStop" type="number" min="1" max="100" value="12" /><em>%</em></div></label>
+        </section>
+        <section class="strategy-parameters is-hidden" id="strategyParameterSection">
+          <div class="parameter-heading"><span>策略参数</span><small>由策略接口自动生成</small></div>
+          <div class="parameter-grid" id="strategyParameterFields"></div>
+        </section>
+        <section class="allocation-summary">
+          <div><span>组合本金</span><strong id="capitalSummary">5,000 U</strong></div>
+          <div><span>已分配</span><strong id="allocatedSummary">5,000 U</strong></div>
+          <div><span>备用资金</span><strong id="reserveSummary">0 U</strong></div>
+          <div class="allocation-meter"><span id="allocationBar"></span></div>
+        </section>
+        <section class="project-editor">
+          <div class="project-editor-head"><span>项目</span><span>交易标的</span><span>项目预算</span><span>首次投入</span><span>杠杆</span></div>
+          <div id="projectRows"></div>
+        </section>
+      </div>
+      <footer class="dialog-footer">
+        <span id="portfolioError">项目预算之和不能超过组合本金。</span>
+        <div><button class="button secondary" id="savePortfolioButton" type="button">保存组合</button><button class="button primary" id="runPortfolioButton" type="submit">运行历史验证</button></div>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="agent-settings-dialog" id="agentSettingsDialog">
+    <form method="dialog" class="agent-settings-shell" id="agentSettingsForm">
+      <header class="dialog-header">
+        <div><p class="eyebrow">AGENT CONFIGURATION</p><h2>智能体设置</h2><span>密钥仅保留在本次运行内存中</span></div>
+        <button class="dialog-close" id="closeAgentSettings" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="agent-settings-body">
+        <section class="settings-section">
+          <div class="settings-section-title"><strong>模型</strong><span>选择判断引擎</span></div>
+          <div class="provider-segments" id="agentProviderSegments">
+            <label><input type="radio" name="agentProvider" value="rules" checked /><span>规则共识</span></label>
+            <label><input type="radio" name="agentProvider" value="deepseek" /><span>DeepSeek</span></label>
+            <label><input type="radio" name="agentProvider" value="openai" /><span>OpenAI</span></label>
+          </div>
+          <div class="settings-grid two">
+            <label><span>模型名称</span><input id="agentModelInput" type="text" value="deepseek-chat" autocomplete="off" /></label>
+            <label><span>API Key</span><input id="agentApiKey" type="password" autocomplete="new-password" placeholder="仅当前进程" /></label>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-title"><strong>监控队列</strong><button class="icon-button small" id="addWatchItem" type="button" title="添加标的" aria-label="添加标的">＋</button></div>
+          <div class="watch-editor" id="agentWatchEditor"></div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-title"><strong>Skills</strong><span>开关与权重</span></div>
+          <div class="skill-settings" id="agentSkillSettings"></div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-title"><strong>硬风控</strong><span>模型输出必须通过这里</span></div>
+          <div class="settings-grid four">
+            <label><span>参考本金</span><div class="input-unit"><input id="riskBalance" type="number" min="100" value="1000" /><em>U</em></div></label>
+            <label><span>单笔风险</span><div class="input-unit"><input id="riskPerTrade" type="number" min="0.1" max="5" step="0.1" value="1" /><em>%</em></div></label>
+            <label><span>参考杠杆</span><div class="input-unit"><input id="riskLeverage" type="number" min="1" max="125" value="3" /><em>x</em></div></label>
+            <label><span>最大保证金</span><div class="input-unit"><input id="riskMaxMargin" type="number" min="1" max="100" value="20" /><em>%</em></div></label>
+            <label><span>最低置信度</span><div class="input-unit"><input id="riskConfidence" type="number" min="1" max="100" value="60" /><em>%</em></div></label>
+            <label><span>最小盈亏比</span><input id="riskReward" type="number" min="1" max="10" step="0.1" value="1.5" /></label>
+            <label><span>最大止损距离</span><div class="input-unit"><input id="riskMaxStop" type="number" min="0.1" max="20" step="0.1" value="3" /><em>%</em></div></label>
+            <label><span>轮询间隔</span><div class="input-unit"><input id="agentPollSeconds" type="number" min="10" max="3600" value="30" /><em>秒</em></div></label>
+          </div>
+        </section>
+
+        <section class="settings-section feishu-settings">
+          <div class="settings-section-title"><strong>飞书推送</strong><label class="switch-control"><input id="agentPushEnabled" type="checkbox" checked /><span></span></label></div>
+          <div class="settings-grid two">
+            <label><span>机器人 Webhook</span><input id="feishuWebhook" type="password" autocomplete="new-password" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." /></label>
+            <label><span>签名密钥</span><input id="feishuSecret" type="password" autocomplete="new-password" placeholder="可选，建议启用" /></label>
+          </div>
+          <button class="button secondary compact" id="testFeishuButton" type="button">发送测试消息</button>
+        </section>
+      </div>
+      <footer class="dialog-footer"><span id="agentSettingsError">设置保存后可立即运行。</span><div><button class="button primary" id="saveAgentSettings" type="submit">保存设置</button></div></footer>
+    </form>
+  </dialog>
+
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+  <dialog id="workspaceDialog" class="workspace-dialog"><form id="workspaceForm"><header><h3 id="workspaceDialogTitle"></h3><button type="button" id="closeWorkspaceDialog" aria-label="关闭">×</button></header><div id="workspaceDialogBody"></div><p id="workspaceDialogError" role="alert"></p><footer><button class="button secondary" id="cancelWorkspaceDialog" type="button">取消</button><button class="button primary" id="submitWorkspaceDialog" type="submit">保存</button></footer></form></dialog>
+  <script src="app.js?v=0.10.0"></script>
+  <script src="workspace.js?v=0.10.0"></script>
+</body>
+</html>

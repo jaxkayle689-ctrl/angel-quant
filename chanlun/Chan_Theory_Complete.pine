@@ -1,0 +1,1938 @@
+//@version=6
+indicator("Chan Theory Complete | Chanlun Structure Pro", overlay = true, max_lines_count = 480, max_boxes_count = 420, max_labels_count = 480, max_bars_back = 5000)
+// Independent implementation. Frozen events commit on closed bars only.
+// Endpoint time is historical; confirmation/alert time is the later evidence bar.
+
+enum Life
+    candidate = "Candidate"
+    confirmed = "Confirmed"
+    invalidated = "Invalidated"
+
+type Meta
+    int id = 0
+    int bar_index = 0
+    int timestamp = 0
+    float high = na
+    float low = na
+    int direction = 0
+    bool confirmed = false
+    int start_index = 0
+    int end_index = 0
+    int start_time = 0
+    int end_time = 0
+    int confirmed_at_index = na
+    int confirmed_at_time = na
+
+type Momentum
+    float area = 0.0
+    float peak = 0.0
+    float hist_peak = 0.0
+    int bars = 0
+    bool complete = false
+
+type Leg
+    Meta m
+    float start_price = na
+    float end_price = na
+    int first_child = 0
+    int last_child = 0
+    int count = 1
+    Momentum mom
+    string reason = ""
+
+type Event
+    string kind = ""
+    int level = 0
+    int side = 0
+    int signal_class = 0
+    Life state = Life.candidate
+    int source_id = 0
+    int index = 0
+    int ts = 0
+    float price = na
+    string reason = ""
+
+string algoMode = input.string("完整", "算法模式", options = ["完整", "Core"], group = "基础")
+bool enableSignals = algoMode == "完整"
+int maxHistory = input.int(2000, "最大历史长度", options = [500, 1000, 2000, 5000], group = "基础")
+string startMode = input.string("最近历史", "计算起点", options = ["最近历史", "固定时间"], group = "基础")
+int fixedStart = input.time(timestamp("01 Jan 2024 00:00 +0000"), "固定开始时间", group = "基础")
+bool debug = input.bool(false, "Debug / 结构证据", group = "基础")
+bool runTests = input.bool(false, "运行内置验收断言", group = "基础")
+bool removeInclusion = input.bool(true, "处理包含关系", group = "K线")
+bool showBars = input.bool(false, "显示处理后 K 线范围", group = "K线")
+bool showFractals = input.bool(false, "显示分型", group = "分型")
+bool strictFractal = input.bool(true, "严格分型模式", group = "分型")
+bool showCandidateFractals = input.bool(true, "显示未确认分型", group = "分型")
+bool showStrokes = input.bool(true, "显示笔", group = "笔")
+string strokeMode = input.string("严格笔", "笔模式", options = ["严格笔", "新笔"], group = "笔")
+int minBars = input.int(4, "两中心在内最少处理 K 数", minval = 4, maxval = 30, group = "笔")
+bool showCandidateStrokes = input.bool(true, "显示未确认笔", group = "笔")
+bool showSegments = input.bool(true, "显示线段", group = "线段")
+bool strictSegment = input.bool(true, "严格线段模式", group = "线段")
+bool gapConfirm = input.bool(true, "缺口二次确认（关闭时缺口候选不锁定）", group = "线段")
+bool showCandidateSegments = input.bool(true, "显示未确认线段", group = "线段")
+bool showFeatures = input.bool(false, "显示活动特征序列", group = "线段")
+bool showFeatureFractals = input.bool(false, "显示特征序列分型证据", group = "线段")
+bool showLowPivots = input.bool(true, "显示笔中枢 / 次级别", group = "中枢")
+bool showHighPivots = input.bool(true, "显示线段中枢 / 本级别", group = "中枢")
+bool showBounds = input.bool(true, "显示 ZG / ZD", group = "中枢")
+bool extendPivots = input.bool(true, "活动中枢延伸显示", group = "中枢")
+bool showClass1 = input.bool(true, "显示一类买卖点", group = "买卖点")
+bool showClass2 = input.bool(true, "显示二类买卖点", group = "买卖点")
+bool showClass3 = input.bool(true, "显示三类买卖点", group = "买卖点")
+bool showCandidateSignals = input.bool(true, "显示候选信号", group = "买卖点")
+bool showInvalidated = input.bool(false, "保留失效 X 标记", group = "买卖点")
+bool videoSpecialB2 = input.bool(true, "视频特殊二类点（允许轻微越过一类点）", group = "买卖点")
+float specialB2Tolerance = input.float(0.5, "特殊二类点最大越界 %", minval = 0.1, maxval = 3.0, step = 0.1, group = "买卖点") / 100.0
+bool trendFilter = input.bool(false, "大结构方向过滤（弱化逆向标签）", group = "买卖点")
+string lowPrefix = input.string("L", "笔级标签前缀", group = "买卖点")
+string highPrefix = input.string("H", "线段级标签前缀", group = "买卖点")
+bool showDivergence = input.bool(true, "显示背驰", group = "背驰")
+string divAlgorithm = input.string("综合模式", "背驰算法", options = ["MACD柱面积", "DIF峰值", "综合模式"], group = "背驰")
+float divRatio = input.float(0.85, "背驰灵敏度 / 力度比例上限", minval = 0.5, maxval = 1.0, step = 0.05, group = "背驰")
+int areaWindow = input.int(2000, "MACD 面积最大结构长度", minval = 50, maxval = 5000, group = "背驰")
+int macdFast = input.int(12, "Fast", minval = 1, group = "MACD")
+int macdSlow = input.int(26, "Slow", minval = 2, group = "MACD")
+int macdSignal = input.int(9, "Signal", minval = 1, group = "MACD")
+bool monochrome = input.bool(true, "笔统一颜色", group = "外观")
+color strokeColor = input.color(color.black, "统一笔颜色", group = "外观")
+color riseColor = input.color(color.teal, "上涨笔颜色", group = "外观")
+color fallColor = input.color(color.red, "下跌笔颜色", group = "外观")
+color segmentColor = input.color(color.blue, "线段颜色", group = "外观")
+color lowPivotColor = input.color(color.blue, "笔中枢颜色", group = "外观")
+color highPivotColor = input.color(color.orange, "线段中枢颜色", group = "外观")
+color buyColor = input.color(color.green, "一/三买颜色", group = "外观")
+color buy2Color = input.color(color.aqua, "二买颜色", group = "外观")
+color sellColor = input.color(color.red, "一/三卖颜色", group = "外观")
+color sell2Color = input.color(color.orange, "二卖颜色", group = "外观")
+int strokeWidth = input.int(1, "笔线宽", minval = 1, maxval = 3, group = "外观")
+int segmentWidth = input.int(3, "线段线宽", minval = 2, maxval = 5, group = "外观")
+int pivotAlpha = input.int(88, "中枢透明度", minval = 50, maxval = 98, group = "外观")
+string labelSize = input.string(size.tiny, "标签大小", options = [size.tiny, size.small, size.normal], group = "外观")
+bool showDashboard = input.bool(true, "显示 Dashboard", group = "外观")
+
+f_contains(float ah, float al, float bh, float bl) =>
+    (ah >= bh and al <= bl) or (bh >= ah and bl <= al)
+
+f_relation(float ah, float al, float bh, float bl) =>
+    bh > ah and bl > al ? 1 : bh < ah and bl < al ? -1 : 0
+
+f_fractalKind(float ah, float al, float bh, float bl, float ch, float cl, bool strict) =>
+    bool top = strict ? bh > ah and bh > ch and bl > al and bl > cl : bh >= ah and bh >= ch and bl >= al and bl >= cl and (bh > ah or bl > al) and (bh > ch or bl > cl)
+    bool bottom = strict ? bh < ah and bh < ch and bl < al and bl < cl : bh <= ah and bh <= ch and bl <= al and bl <= cl and (bh < ah or bl < al) and (bh < ch or bl < cl)
+    top and not bottom ? 1 : bottom and not top ? -1 : 0
+
+f_meta(int id, int si, int st, int ei, int et, float sp, float ep, bool confirmed) =>
+    Meta.new(id, ei, et, math.max(sp, ep), math.min(sp, ep), ep > sp ? 1 : ep < sp ? -1 : 0, confirmed, si, ei, st, et, confirmed ? bar_index : na, confirmed ? (na(time_close) ? time : time_close) : na)
+
+f_legCopy(Leg x) =>
+    Leg result = na
+    if not na(x)
+        result := Leg.new(x.m.copy(), x.start_price, x.end_price, x.first_child, x.last_child, x.count, na(x.mom) ? Momentum.new() : x.mom.copy(), x.reason)
+    result
+
+f_overlap3(Leg a, Leg b, Leg c) =>
+    [math.max(a.m.low, math.max(b.m.low, c.m.low)), math.min(a.m.high, math.min(b.m.high, c.m.high))]
+
+f_emit(array<Event> events, string kind, int level, int side, int cls, Life state, int id, int ix, int ts, float price, string reason) =>
+    events.push(Event.new(kind, level, side, cls, state, id, ix, ts, price, reason))
+
+f_num(float x) =>
+    na(x) ? "N/A" : str.tostring(x, format.mintick)
+
+f_dir(int x) =>
+    x == 1 ? "↑" : x == -1 ? "↓" : "?"
+
+// Phase 1: direction-aware inclusion, closed raw bars only.
+type ChanBar
+    Meta m
+    int high_index = 0
+    int low_index = 0
+    int high_time = 0
+    int low_time = 0
+    int raw_count = 1
+
+type InclusionEngine
+    ChanBar tail
+    array<ChanBar> unresolved
+    int direction = 0
+    int next_id = 0
+    int skipped = 0
+    int total = 0
+
+f_inclusionEngine() =>
+    InclusionEngine.new(unresolved = array.new<ChanBar>())
+
+f_rawBar(int ix, int ts, int et, float hi, float lo) =>
+    Meta m = Meta.new(0, ix, ts, hi, lo, 0, false, ix, ix, ts, et, na, na)
+    ChanBar.new(m, ix, ix, ts, ts, 1)
+
+f_barCopy(ChanBar x) =>
+    ChanBar.new(x.m.copy(), x.high_index, x.low_index, x.high_time, x.low_time, x.raw_count)
+
+// The video determines inclusion direction from established neighbouring
+// structure. At the left boundary there is no direction yet, so keep every raw
+// bar and replay the whole containing prefix once the first direction appears.
+method resolvePrefix(InclusionEngine self, int direction) =>
+    ChanBar merged = f_barCopy(self.unresolved.get(0))
+    int n = self.unresolved.size()
+    if n > 1
+        for i = 1 to n - 1
+            ChanBar item = self.unresolved.get(i)
+            bool takeHigh = direction == 1 ? item.m.high > merged.m.high : item.m.high < merged.m.high
+            bool takeLow = direction == 1 ? item.m.low > merged.m.low : item.m.low < merged.m.low
+            if takeHigh
+                merged.m.high := item.m.high
+                merged.high_index := item.high_index
+                merged.high_time := item.high_time
+            if takeLow
+                merged.m.low := item.m.low
+                merged.low_index := item.low_index
+                merged.low_time := item.low_time
+            merged.m.end_index := item.m.end_index
+            merged.m.end_time := item.m.end_time
+            merged.m.bar_index := item.m.bar_index
+            merged.m.timestamp := item.m.timestamp
+            merged.raw_count += item.raw_count
+    merged
+
+method ingest(InclusionEngine self, ChanBar raw) =>
+    ChanBar event = na
+    if na(self.tail)
+        self.tail := f_barCopy(raw)
+        self.tail.m.id := self.next_id
+        if removeInclusion
+            self.unresolved.push(f_barCopy(raw))
+        self.next_id += 1
+    else
+        ChanBar tail = self.tail
+        bool contains = f_contains(tail.m.high, tail.m.low, raw.m.high, raw.m.low)
+        if removeInclusion and contains and self.direction == 0
+            self.unresolved.push(f_barCopy(raw))
+            self.tail := f_barCopy(raw)
+            self.tail.m.id := tail.m.id
+        else if removeInclusion and contains
+            bool takeHigh = self.direction == 1 ? raw.m.high > tail.m.high : raw.m.high < tail.m.high
+            bool takeLow = self.direction == 1 ? raw.m.low > tail.m.low : raw.m.low < tail.m.low
+            if takeHigh
+                tail.m.high := raw.m.high
+                tail.high_index := raw.high_index
+                tail.high_time := raw.high_time
+            if takeLow
+                tail.m.low := raw.m.low
+                tail.low_index := raw.low_index
+                tail.low_time := raw.low_time
+            tail.m.end_index := raw.m.end_index
+            tail.m.end_time := raw.m.end_time
+            tail.m.bar_index := raw.m.bar_index
+            tail.m.timestamp := raw.m.timestamp
+            tail.raw_count += 1
+            self.skipped += 1
+        else
+            int rel = f_relation(tail.m.high, tail.m.low, raw.m.high, raw.m.low)
+            self.direction := rel == 0 ? self.direction : rel
+            bool resolving = removeInclusion and self.unresolved.size() > 0
+            event := resolving ? self.resolvePrefix(self.direction) : f_barCopy(tail)
+            if resolving
+                self.skipped += math.max(0, self.unresolved.size() - 1)
+                self.unresolved.clear()
+            if resolving and f_contains(event.m.high, event.m.low, raw.m.high, raw.m.low)
+                bool takeHigh = self.direction == 1 ? raw.m.high > event.m.high : raw.m.high < event.m.high
+                bool takeLow = self.direction == 1 ? raw.m.low > event.m.low : raw.m.low < event.m.low
+                if takeHigh
+                    event.m.high := raw.m.high
+                    event.high_index := raw.high_index
+                    event.high_time := raw.high_time
+                if takeLow
+                    event.m.low := raw.m.low
+                    event.low_index := raw.low_index
+                    event.low_time := raw.low_time
+                event.m.end_index := raw.m.end_index
+                event.m.end_time := raw.m.end_time
+                event.m.bar_index := raw.m.bar_index
+                event.m.timestamp := raw.m.timestamp
+                event.m.direction := self.direction
+                event.raw_count += 1
+                self.skipped += 1
+                self.tail := event
+                event := na
+            else
+                event.m.confirmed := true
+                event.m.confirmed_at_index := raw.m.bar_index
+                event.m.confirmed_at_time := raw.m.end_time
+                event.m.direction := tail.m.direction == 0 ? self.direction : tail.m.direction
+                self.total += 1
+                self.tail := f_barCopy(raw)
+                self.tail.m.id := self.next_id
+                self.tail.m.direction := self.direction
+                self.next_id += 1
+    event
+
+// Phase 2: only three FROZEN ChanBars create a frozen Fractal.
+type Fractal
+    Meta m
+    int kind = 0
+    int center_seq = 0
+    int left_seq = 0
+    int right_seq = 0
+    float price = na
+
+type FractalEngine
+    array<ChanBar> recent
+    int next_id = 0
+    int total = 0
+
+f_makeFractal(ChanBar a, ChanBar b, ChanBar c, int id, bool confirmed) =>
+    int kind = f_fractalKind(a.m.high, a.m.low, b.m.high, b.m.low, c.m.high, c.m.low, strictFractal)
+    Fractal result = na
+    if kind != 0
+        int ix = kind == 1 ? b.high_index : b.low_index
+        int ts = kind == 1 ? b.high_time : b.low_time
+        float price = kind == 1 ? b.m.high : b.m.low
+        Meta m = Meta.new(id, ix, ts, b.m.high, b.m.low, kind, confirmed, a.m.start_index, c.m.end_index, a.m.start_time, c.m.end_time, confirmed ? bar_index : na, confirmed ? (na(time_close) ? time : time_close) : na)
+        result := Fractal.new(m, kind, b.m.id, a.m.id, c.m.id, price)
+    result
+
+method onBar(FractalEngine self, ChanBar value) =>
+    self.recent.push(value)
+    if self.recent.size() > 3
+        self.recent.shift()
+    Fractal result = na
+    if self.recent.size() == 3
+        result := f_makeFractal(self.recent.get(0), self.recent.get(1), self.recent.get(2), self.next_id, true)
+        if not na(result)
+            self.next_id += 1
+            self.total += 1
+    result
+
+method previewFractal(FractalEngine self, ChanBar tail) =>
+    Fractal result = na
+    int n = self.recent.size()
+    if n >= 2 and not na(tail)
+        result := f_makeFractal(self.recent.get(n - 2), self.recent.get(n - 1), tail, self.next_id, false)
+    result
+
+// Phase 3: one mutable pen. A valid reverse pen locks its predecessor.
+type Stroke
+    Leg leg
+    int start_fractal = 0
+    int end_fractal = 0
+
+type StrokeEngine
+    Fractal anchor
+    Fractal tip
+    Leg preview
+    int next_id = 0
+    int total = 0
+    string reason = "等待起始分型"
+
+f_validStroke(Fractal a, Fractal b) =>
+    bool valid = false
+    if not na(a) and not na(b)
+        int distance = b.center_seq - a.center_seq
+        int floorDistance = strokeMode == "严格笔" ? 4 : 3
+        int requested = math.max(floorDistance, minBars - 1)
+        bool alternating = a.kind != b.kind
+        bool nonSharing = b.left_seq > a.right_seq
+        bool ordered = a.kind == -1 ? b.price > a.price : b.price < a.price
+        bool rawSpan = strokeMode == "严格笔" or b.m.bar_index - a.m.bar_index + 1 >= 5
+        valid := alternating and nonSharing and ordered and distance >= requested and rawSpan
+    valid
+
+f_strokeLeg(Fractal a, Fractal b, int id, bool confirmed) =>
+    Meta m = f_meta(id, a.m.bar_index, a.m.timestamp, b.m.bar_index, b.m.timestamp, a.price, b.price, confirmed)
+    string reason = "F" + str.tostring(a.m.id) + "→F" + str.tostring(b.m.id) + " CB=" + str.tostring(b.center_seq - a.center_seq + 1) + " no shared CB; " + strokeMode
+    Leg.new(m, a.price, b.price, a.m.id, b.m.id, b.center_seq - a.center_seq + 1, Momentum.new(), reason)
+
+method onFractal(StrokeEngine self, Fractal f) =>
+    Leg frozen = na
+    if na(self.anchor)
+        self.anchor := f
+    else if na(self.tip)
+        if f.kind == self.anchor.kind
+            bool extreme = f.kind == 1 ? f.price > self.anchor.price : f.price < self.anchor.price
+            if extreme
+                self.anchor := f
+        else if f_validStroke(self.anchor, f)
+            self.tip := f
+        else
+            self.reason := "笔等待：分型间距/不共用/价格方向未满足"
+    else if f.kind == self.tip.kind
+        bool extreme = f.kind == 1 ? f.price > self.tip.price : f.price < self.tip.price
+        if extreme and f_validStroke(self.anchor, f)
+            self.tip := f
+    else if f_validStroke(self.tip, f)
+        frozen := f_strokeLeg(self.anchor, self.tip, self.next_id, true)
+        self.next_id += 1
+        self.total += 1
+        self.anchor := self.tip
+        self.tip := f
+    if not na(self.anchor) and not na(self.tip)
+        self.preview := f_strokeLeg(self.anchor, self.tip, self.next_id, false)
+        self.reason := "候选笔，等待合格反向笔；" + self.preview.reason
+    frozen
+
+// Phase 9 primitive: prefix sums + ring range-max trees. Interval (start,end].
+// A shared endpoint is never counted twice. Missing samples fail closed.
+type MomentumStore
+    array<int> ids
+    array<float> positive
+    array<float> negative
+    array<int> missing
+    array<float> dif_up
+    array<float> dif_down
+    array<float> hist_up
+    array<float> hist_down
+    int capacity = 0
+    int base = 0
+    float pos_total = 0.0
+    float neg_total = 0.0
+    int missing_total = 0
+
+f_momentumStore(int capacity) =>
+    int base = 1
+    while base < capacity
+        base *= 2
+    MomentumStore.new(array.new<int>(capacity, -1), array.new<float>(capacity, 0.0), array.new<float>(capacity, 0.0), array.new<int>(capacity, 0), array.new<float>(2 * base, 0.0), array.new<float>(2 * base, 0.0), array.new<float>(2 * base, 0.0), array.new<float>(2 * base, 0.0), capacity, base, 0.0, 0.0, 0)
+
+f_treeSet(array<float> tree, int base, int slot, float value) =>
+    int p = base + slot
+    tree.set(p, value)
+    p := int(p / 2)
+    while p >= 1
+        tree.set(p, math.max(tree.get(2 * p), tree.get(2 * p + 1)))
+        p := int(p / 2)
+    0
+
+f_treeRange(array<float> tree, int base, int fromSlot, int toSlot) =>
+    int left = base + fromSlot
+    int right = base + toSlot
+    float peak = 0.0
+    while left <= right
+        if left % 2 == 1
+            peak := math.max(peak, tree.get(left))
+            left += 1
+        if right % 2 == 0
+            peak := math.max(peak, tree.get(right))
+            right -= 1
+        left := int(left / 2)
+        right := int(right / 2)
+    peak
+
+f_ringPeak(array<float> tree, int base, int capacity, int first, int last) =>
+    first <= last ? f_treeRange(tree, base, first, last) : math.max(f_treeRange(tree, base, first, capacity - 1), f_treeRange(tree, base, 0, last))
+
+method sample(MomentumStore self, int ix, float dif, float histogram) =>
+    int slot = ix % self.capacity
+    self.pos_total += math.max(nz(histogram), 0.0)
+    self.neg_total += math.max(-nz(histogram), 0.0)
+    self.missing_total += na(dif) or na(histogram) ? 1 : 0
+    self.missing.set(slot, self.missing_total)
+    self.ids.set(slot, na(dif) or na(histogram) ? -1 : ix)
+    self.positive.set(slot, self.pos_total)
+    self.negative.set(slot, self.neg_total)
+    f_treeSet(self.dif_up, self.base, slot, math.max(nz(dif), 0.0))
+    f_treeSet(self.dif_down, self.base, slot, math.max(-nz(dif), 0.0))
+    f_treeSet(self.hist_up, self.base, slot, math.max(nz(histogram), 0.0))
+    f_treeSet(self.hist_down, self.base, slot, math.max(-nz(histogram), 0.0))
+    0
+
+method measure(MomentumStore self, Leg leg) =>
+    Momentum m = Momentum.new()
+    if not na(leg)
+        int si = leg.m.start_index
+        int ei = leg.m.end_index
+        int length = ei - si
+        int first = (si + 1) % self.capacity
+        int last = ei % self.capacity
+        int startSlot = si % self.capacity
+        m.bars := length
+        if length > 0 and length <= areaWindow and length < self.capacity and self.ids.get(startSlot) == si and self.ids.get(last) == ei and si >= macdSlow + macdSignal and self.missing.get(last) == self.missing.get(startSlot)
+            bool up = leg.m.direction == 1
+            m.area := up ? self.positive.get(last) - self.positive.get(startSlot) : self.negative.get(last) - self.negative.get(startSlot)
+            m.peak := f_ringPeak(up ? self.dif_up : self.dif_down, self.base, self.capacity, first, last)
+            m.hist_peak := f_ringPeak(up ? self.hist_up : self.hist_down, self.base, self.capacity, first, last)
+            m.complete := true
+    m
+
+// -----------------------------------------------------------------------------
+// Segments. Only frozen strokes enter this module. The feature tail remains
+// mutable until another non-containing feature arrives; only THREE FROZEN
+// feature elements can establish an endpoint. This deliberate extra delay avoids
+// accepting a right-hand feature which later inclusion would change.
+// -----------------------------------------------------------------------------
+type FeatureElement
+    Meta m
+    int first_child = 0
+    int last_child = 0
+    int count = 1
+    int high_child = 0
+    int low_child = 0
+    int high_index = 0
+    int high_time = 0
+    int low_index = 0
+    int low_time = 0
+    bool gap_before = false
+    int fractal_kind = 0
+
+type FeatureStream
+    array<FeatureElement> items
+    int owner_direction = 0
+    int merge_direction = 0
+    int last_child = 0
+    FeatureElement fractal_a = na
+    FeatureElement fractal_b = na
+    FeatureElement fractal_c = na
+
+f_featureStream(int owner) =>
+    FeatureStream.new(items = array.new<FeatureElement>(), owner_direction = owner)
+
+f_featureFromLeg(Leg s) =>
+    bool up = s.m.direction > 0
+    Meta fm = s.m.copy()
+    fm.confirmed := false
+    fm.confirmed_at_index := na
+    fm.confirmed_at_time := na
+    FeatureElement.new(m = fm, first_child = s.m.id, last_child = s.m.id, high_child = s.m.id, low_child = s.m.id, high_index = up ? s.m.end_index : s.m.start_index, high_time = up ? s.m.end_time : s.m.start_time, low_index = up ? s.m.start_index : s.m.end_index, low_time = up ? s.m.start_time : s.m.end_time)
+
+// Inclusion uses the movement of feature INTERVALS. Before the first distinct
+// interval pair, the established owner segment supplies the initial direction;
+// it never uses the opposing stroke's direction as the merge direction.
+method addFeature(FeatureStream self, Leg s) =>
+    bool found = false
+    self.fractal_a := na
+    self.fractal_b := na
+    self.fractal_c := na
+    if s.m.direction == -self.owner_direction and s.m.id > self.last_child
+        self.last_child := s.m.id
+        FeatureElement incoming = f_featureFromLeg(s)
+        int n = array.size(self.items)
+        if n == 0
+            array.push(self.items, incoming)
+        else
+            FeatureElement tail = array.get(self.items, n - 1)
+            if f_contains(tail.m.high, tail.m.low, incoming.m.high, incoming.m.low)
+                int mergeDir = self.merge_direction == 0 ? self.owner_direction : self.merge_direction
+                bool takeHigh = mergeDir > 0 ? incoming.m.high > tail.m.high : incoming.m.high < tail.m.high
+                bool takeLow = mergeDir > 0 ? incoming.m.low > tail.m.low : incoming.m.low < tail.m.low
+                if takeHigh
+                    tail.m.high := incoming.m.high
+                    tail.high_child := incoming.high_child
+                    tail.high_index := incoming.high_index
+                    tail.high_time := incoming.high_time
+                if takeLow
+                    tail.m.low := incoming.m.low
+                    tail.low_child := incoming.low_child
+                    tail.low_index := incoming.low_index
+                    tail.low_time := incoming.low_time
+                tail.last_child := incoming.last_child
+                tail.count += 1
+                tail.m.end_index := incoming.m.end_index
+                tail.m.end_time := incoming.m.end_time
+            else
+                self.merge_direction := f_relation(tail.m.high, tail.m.low, incoming.m.high, incoming.m.low)
+                tail.m.confirmed := true
+                tail.m.confirmed_at_index := bar_index
+                tail.m.confirmed_at_time := time
+                incoming.gap_before := incoming.m.low > tail.m.high or incoming.m.high < tail.m.low
+                array.push(self.items, incoming)
+                int sizeNow = array.size(self.items)
+                if sizeNow >= 4
+                    FeatureElement a = array.get(self.items, sizeNow - 4)
+                    FeatureElement b = array.get(self.items, sizeNow - 3)
+                    FeatureElement c = array.get(self.items, sizeNow - 2)
+                    int kind = f_fractalKind(a.m.high, a.m.low, b.m.high, b.m.low, c.m.high, c.m.low, strictFractal)
+                    if kind == self.owner_direction
+                        b.fractal_kind := kind
+                        self.fractal_a := a
+                        self.fractal_b := b
+                        self.fractal_c := c
+                        found := true
+    found
+
+type SegmentEngine
+    array<Leg> pending
+    array<FeatureElement> features
+    FeatureStream primary
+    FeatureStream secondary
+    Leg preview = na
+    Leg candidate = na
+    string reason = "等待至少三笔共同重叠"
+    int direction = 0
+    int next_id = 1
+    int last_stroke_id = 0
+    int candidate_end_pos = -1
+    int candidate_feature_id = 0
+    int secondary_id = 0
+    int skipped_strokes = 0
+    int processed_strokes = 0
+    float running_high = na
+    float running_low = na
+    float boundary_first_end = na
+    bool candidate_gap = false
+    bool candidate_boundary = false
+    bool boundary_broken = false
+    bool seeded = false
+    bool anchored = false
+    bool blocked = false
+
+f_segmentEngine() =>
+    FeatureStream primary = f_featureStream(0)
+    SegmentEngine.new(pending = array.new<Leg>(), features = primary.items, primary = primary, secondary = f_featureStream(0))
+
+f_segmentSeedOK(Leg a, Leg b, Leg c) =>
+    [zd, zg] = f_overlap3(a, b, c)
+    a.m.direction != 0 and b.m.direction == -a.m.direction and c.m.direction == a.m.direction and zg > zd and (c.end_price - a.start_price) * a.m.direction > 0
+
+method updateSegmentPreview(SegmentEngine self, Leg s) =>
+    if na(self.preview)
+        Leg first = array.get(self.pending, 0)
+        self.preview := Leg.new(m = f_meta(self.next_id, first.m.start_index, first.m.start_time, first.m.end_index, first.m.end_time, first.start_price, first.end_price, false), start_price = first.start_price, end_price = first.end_price, first_child = first.m.id, last_child = first.m.id, mom = Momentum.new(), reason = "等待有效特征序列分型")
+    if s.m.direction == self.direction and (s.end_price - self.preview.end_price) * self.direction > 0
+        self.preview.m.end_index := s.m.end_index
+        self.preview.m.end_time := s.m.end_time
+        self.preview.m.bar_index := s.m.end_index
+        self.preview.m.timestamp := s.m.end_time
+        self.preview.m.high := self.running_high
+        self.preview.m.low := self.running_low
+        self.preview.end_price := s.end_price
+        self.preview.last_child := s.m.id
+        self.preview.count := self.processed_strokes
+    0
+
+method clearSegmentCandidate(SegmentEngine self, string why) =>
+    self.candidate := na
+    self.candidate_end_pos := -1
+    self.candidate_feature_id := 0
+    self.candidate_gap := false
+    self.candidate_boundary := false
+    self.boundary_broken := false
+    self.boundary_first_end := na
+    self.secondary_id := 0
+    self.secondary := f_featureStream(-self.direction)
+    self.reason := why
+    0
+
+method segmentReverseReady(SegmentEngine self) =>
+    bool ready = false
+    int begin = self.candidate_end_pos + 1
+    if not na(self.candidate) and begin >= 0 and array.size(self.pending) >= begin + 3
+        Leg a = array.get(self.pending, begin)
+        Leg b = array.get(self.pending, begin + 1)
+        Leg c = array.get(self.pending, begin + 2)
+        ready := a.m.direction == -self.direction and f_segmentSeedOK(a, b, c)
+    ready
+
+method rebuildSecondary(SegmentEngine self) =>
+    self.secondary := f_featureStream(-self.direction)
+    self.secondary_id := 0
+    int begin = self.candidate_end_pos + 1
+    int n = array.size(self.pending)
+    if begin >= 0 and n > begin
+        for i = begin to n - 1
+            Leg s = array.get(self.pending, i)
+            bool found = self.secondary.addFeature(s)
+            if found and self.secondary_id == 0
+                self.secondary_id := self.secondary.fractal_b.m.id
+    0
+
+// Locate the original extremum's source stroke, not the synthetic feature's
+// last bar. A downward feature's HIGH starts the first reverse stroke; a rising
+// feature's LOW does the same for a downward owner segment.
+method considerSegmentEndpoint(SegmentEngine self) =>
+    FeatureElement a = self.primary.fractal_a
+    FeatureElement b = self.primary.fractal_b
+    if not na(a) and not na(b)
+        int source = self.direction > 0 ? b.high_child : b.low_child
+        int sourcePos = -1
+        int n = array.size(self.pending)
+        if n > 0
+            for i = 0 to n - 1
+                if array.get(self.pending, i).m.id == source
+                    sourcePos := i
+                    break
+        // sourcePos equals the number of original strokes before the reversal.
+        if sourcePos >= 3 and sourcePos < n
+            Leg first = array.get(self.pending, 0)
+            Leg endpoint = array.get(self.pending, sourcePos - 1)
+            bool originalExtreme = (endpoint.end_price - self.preview.end_price) * self.direction >= 0
+            bool oriented = endpoint.m.direction == self.direction and (endpoint.end_price - first.start_price) * self.direction > 0
+            bool newer = na(self.candidate) ? true : endpoint.m.end_index > self.candidate.m.end_index
+            if originalExtreme and oriented and newer
+                self.candidate_end_pos := sourcePos - 1
+                self.candidate_feature_id := b.m.id
+                // The defining gap is between FIRST and SECOND elements only.
+                self.candidate_gap := b.m.low > a.m.high or b.m.high < a.m.low
+                self.candidate_boundary := false
+                string evidence = "BI" + str.tostring(first.m.id) + "–BI" + str.tostring(endpoint.m.id) + "; X" + str.tostring(a.m.id) + "/X" + str.tostring(b.m.id) + "/X" + str.tostring(self.primary.fractal_c.m.id)
+                self.candidate := Leg.new(m = f_meta(self.next_id, first.m.start_index, first.m.start_time, endpoint.m.end_index, endpoint.m.end_time, first.start_price, endpoint.end_price, false), start_price = first.start_price, end_price = endpoint.end_price, first_child = first.m.id, last_child = endpoint.m.id, count = sourcePos, mom = Momentum.new(), reason = evidence)
+                self.reason := self.candidate_gap ? "特征分型有缺口：等待反向特征分型二次确认" : "无缺口特征分型：等待反向结构确认"
+                self.rebuildSecondary()
+    0
+
+// Boundary exception (original lessons 71/78): when the FIRST stroke from the
+// proposed endpoint already breaks the previous opposing-stroke interval, it
+// must not erase the turn by being merged across the hypothetical boundary.
+// Keep both hypotheses: the normal stream can still extend if this candidate
+// fails; the boundary branch needs a reverse overlapping triple and a later
+// reverse stroke which breaks the FIRST reverse stroke's endpoint. A large
+// reverse stroke by itself never ends a segment.
+method considerBoundaryBreak(SegmentEngine self, Leg s) =>
+    int nf = array.size(self.primary.items)
+    if na(self.candidate) and s.m.direction == -self.direction and self.processed_strokes >= 4 and nf > 0 and s.start_price == self.preview.end_price
+        FeatureElement previousFeature = array.get(self.primary.items, nf - 1)
+        bool outside = f_contains(previousFeature.m.high, previousFeature.m.low, s.m.high, s.m.low)
+        bool breaksPrevious = self.direction > 0 ? s.end_price < previousFeature.m.low : s.end_price > previousFeature.m.high
+        if outside and breaksPrevious
+            int endPos = self.processed_strokes - 2
+            Leg first = array.get(self.pending, 0)
+            Leg endpoint = array.get(self.pending, endPos)
+            if endpoint.m.direction == self.direction and endpoint.end_price == s.start_price
+                self.candidate_end_pos := endPos
+                self.candidate_feature_id := previousFeature.m.id
+                self.candidate_gap := false
+                self.candidate_boundary := true
+                self.boundary_broken := false
+                self.boundary_first_end := s.end_price
+                string why = "BI" + str.tostring(first.m.id) + "–BI" + str.tostring(endpoint.m.id) + "; boundary X" + str.tostring(previousFeature.m.id) + "; first reverse BI" + str.tostring(s.m.id) + " broke prior feature"
+                self.candidate := Leg.new(m = f_meta(self.next_id, first.m.start_index, first.m.start_time, endpoint.m.end_index, endpoint.m.end_time, first.start_price, endpoint.end_price, false), start_price = first.start_price, end_price = endpoint.end_price, first_child = first.m.id, last_child = endpoint.m.id, count = endPos + 1, mom = Momentum.new(), reason = why)
+                self.secondary := f_featureStream(-self.direction)
+                self.reason := "边界包含例外：首笔破坏，等待反向三笔及突破首笔终点"
+    0
+
+method ingestSegmentTail(SegmentEngine self, Leg s) =>
+    self.processed_strokes += 1
+    self.running_high := na(self.running_high) ? s.m.high : math.max(self.running_high, s.m.high)
+    self.running_low := na(self.running_low) ? s.m.low : math.min(self.running_low, s.m.low)
+    self.updateSegmentPreview(s)
+    if not na(self.candidate) and (s.end_price - self.candidate.end_price) * self.direction > 0
+        self.clearSegmentCandidate("原方向创新极值，旧结束候选失效")
+    self.considerBoundaryBreak(s)
+    if self.candidate_boundary and s.m.direction == -self.direction and (s.end_price - self.boundary_first_end) * self.direction < 0
+        self.boundary_broken := true
+    bool primaryFractal = self.primary.addFeature(s)
+    if primaryFractal
+        self.considerSegmentEndpoint()
+    if not na(self.candidate)
+        bool secondFractal = self.secondary.addFeature(s)
+        if secondFractal and self.secondary_id == 0
+            self.secondary_id := self.secondary.fractal_b.m.id
+    0
+
+// Replays only the bounded, unassigned tail after a confirmed segment. The
+// settled historical prefix is never scanned or modified. At initial startup,
+// triples that fail the seed rule are skipped with a diagnostic count. Once an
+// endpoint has been fixed, the next segment stays anchored to that endpoint.
+method seedSegment(SegmentEngine self) =>
+    int n = array.size(self.pending)
+    if not self.seeded and n >= 3
+        bool searching = true
+        while searching and array.size(self.pending) >= 3
+            Leg a = array.get(self.pending, 0)
+            Leg b = array.get(self.pending, 1)
+            Leg c = array.get(self.pending, 2)
+            if f_segmentSeedOK(a, b, c)
+                self.direction := a.m.direction
+                self.primary := f_featureStream(self.direction)
+                self.features := self.primary.items
+                self.secondary := f_featureStream(-self.direction)
+                self.preview := na
+                self.processed_strokes := 0
+                self.running_high := na
+                self.running_low := na
+                self.seeded := true
+                self.reason := "前三笔已重叠；等待特征分型，允许 5/7/9 笔持续延伸"
+                int remaining = array.size(self.pending)
+                for i = 0 to remaining - 1
+                    self.ingestSegmentTail(array.get(self.pending, i))
+                searching := false
+            else if self.anchored
+                self.reason := "冻结端点后的前三笔未形成反向重叠，保持等待"
+                searching := false
+            else
+                array.shift(self.pending)
+                self.skipped_strokes += 1
+    0
+
+method onStroke(SegmentEngine self, Leg frozenStroke, array<Event> events) =>
+    Leg completed = na
+    if not na(frozenStroke) and not self.blocked and frozenStroke.m.id > self.last_stroke_id
+        bool valid = frozenStroke.m.confirmed and not na(frozenStroke.start_price) and not na(frozenStroke.end_price) and frozenStroke.m.direction != 0 and frozenStroke.m.end_index > frozenStroke.m.start_index
+        int n = array.size(self.pending)
+        if valid and n > 0
+            Leg previous = array.get(self.pending, n - 1)
+            valid := previous.m.direction == -frozenStroke.m.direction and previous.m.end_index == frozenStroke.m.start_index and previous.end_price == frozenStroke.start_price
+        if not valid
+            self.blocked := true
+            self.reason := "线段层暂停：输入笔未冻结、方向不交替或端点不连续"
+        else if n >= math.min(maxHistory, 1200)
+            self.blocked := true
+            self.reason := "线段层暂停：未完成笔缓存已满，拒绝强制切段"
+        else
+            self.last_stroke_id := frozenStroke.m.id
+            array.push(self.pending, f_legCopy(frozenStroke))
+            if self.seeded
+                self.ingestSegmentTail(frozenStroke)
+            else
+                self.seedSegment()
+            if not na(self.candidate)
+                bool reverseReady = self.segmentReverseReady()
+                // Disabling the gap switch suppresses GAP segments. It never
+                // silently turns the required second confirmation into a pass.
+                bool gapReady = not self.candidate_gap or (gapConfirm and self.secondary_id > 0 and reverseReady)
+                bool reversalReady = not strictSegment or reverseReady
+                bool boundaryReady = not self.candidate_boundary or (reverseReady and self.boundary_broken)
+                if self.candidate_gap and not gapConfirm
+                    self.reason := "缺口确认已关闭：保留候选，不发布缺口线段"
+                else if self.candidate_gap and self.secondary_id == 0
+                    self.reason := "缺口线段等待反方向特征分型二次确认"
+                else if not reversalReady
+                    self.reason := "等待从候选端点开始的反向三笔共同重叠"
+                else if not boundaryReady
+                    self.reason := "首笔破坏不足以结束：等待反向三笔并突破首笔终点"
+                if gapReady and reversalReady and boundaryReady
+                    completed := f_legCopy(self.candidate)
+                    completed.m.confirmed := true
+                    completed.m.confirmed_at_index := bar_index
+                    completed.m.confirmed_at_time := time
+                    completed.reason += self.candidate_boundary ? "; boundary inclusion exception; reverse endpoint broken" : self.candidate_gap ? "; gap; secondary X" + str.tostring(self.secondary_id) : "; no gap"
+                    completed.reason += strictSegment ? "; reverse triple confirmed" : "; standard feature confirmation"
+                    int consumed = self.candidate_end_pos + 1
+                    for i = 0 to consumed - 1
+                        Leg child = array.shift(self.pending)
+                        // An unsuccessful one-stroke break can leave an internal
+                        // extremum outside the endpoints (lesson 78). Preserve
+                        // its real interval for higher-level pivot calculation.
+                        completed.m.high := math.max(completed.m.high, child.m.high)
+                        completed.m.low := math.min(completed.m.low, child.m.low)
+                    f_emit(events, "segment", 1, completed.m.direction, 0, Life.confirmed, completed.m.id, completed.m.end_index, completed.m.end_time, completed.end_price, completed.reason)
+                    self.next_id += 1
+                    self.anchored := true
+                    self.seeded := false
+                    self.preview := na
+                    self.clearSegmentCandidate("新线段已冻结；反向尾部继续递推")
+                    self.primary := f_featureStream(-self.direction)
+                    self.features := self.primary.items
+                    self.direction := -self.direction
+                    self.seedSegment()
+    completed
+
+// PHASES 6–12: shared incremental engines for frozen strokes and segments.
+enum PivotState
+    forming = "形成中"
+    confirmed = "已成立"
+    extending = "延伸"
+    leavingUp = "向上离开"
+    leavingDown = "向下离开"
+    retestingUp = "向上离开后回踩"
+    retestingDown = "向下离开后反抽"
+    completed = "已完成"
+
+type ZhongShu
+    Meta m
+    float zd = na
+    float zg = na
+    float gg = na
+    float dd = na
+    PivotState state = PivotState.forming
+    int level = 0
+    int seed1 = 0
+    int seed2 = 0
+    int seed3 = 0
+    int last_member_id = 0
+    int departure_id = 0
+    int retest_id = 0
+    Leg departure = na
+    Leg up_ref = na
+    Leg down_ref = na
+    int completed_at_index = na
+    int completed_at_time = na
+    string reason = ""
+
+type Signal
+    Meta m
+    int level = 0
+    int side = 0
+    int signal_class = 0
+    Life state = Life.candidate
+    string reason = ""
+    int pivot_id = 0
+    int divergence_id = 0
+    int prior_signal_id = 0
+    float key_price = na
+    int retest_id = 0
+    int source_leg_id = 0
+    bool source_frozen = false
+    int invalidated_at_index = na
+
+type Divergence
+    Meta m
+    int level = 0
+    int side = 0
+    Life state = Life.candidate
+    string reason = ""
+    string kind = ""
+    int reference_leg_id = 0
+    int current_leg_id = 0
+    int previous_pivot_id = 0
+    int pivot_id = 0
+    float reference_price = na
+    float current_price = na
+    float area_ratio = na
+    float peak_ratio = na
+    float hist_ratio = na
+    bool source_frozen = false
+    int invalidated_at_index = na
+
+type Move
+    Meta m
+    int level = 0
+    int direction = 0
+    int first_pivot_id = 0
+    int last_pivot_id = 0
+    int pivot_count = 0
+    string kind = ""
+    string reason = ""
+
+type PivotEngine
+    int level = 0
+    ZhongShu active = na
+    ZhongShu previous = na
+    int trend = 0
+    string reason = "等待三条连续确认结构的共同交集"
+    array<ZhongShu> history
+    array<Signal> signals
+    array<Divergence> divergences
+    array<Move> moves
+    array<Leg> seeds
+    ZhongShu previewPivot = na
+    Signal pending1 = na
+    Signal pending2 = na
+    Signal pending3 = na
+    Divergence pendingDiv = na
+    Signal firstAnchor = na
+    int second_stage = 0
+    int rebound_id = 0
+    int next_pivot_id = 1
+    int next_signal_id = 1
+    int next_div_id = 1
+    int next_move_id = 1
+    int last_leg_id = 0
+    Leg last_leg = na
+    bool halted = false
+    string reason1 = "No B1/S1: 等待两个同级中枢和趋势背驰"
+    string reason2 = "No B2/S2: no previous B1/S1"
+    string reason3 = "No B3/S3: 等待中枢、离开及首次反向回抽"
+    string moveType = "待定"
+
+f_pivotEngine(int level) =>
+    PivotEngine e = PivotEngine.new()
+    e.level := level
+    e.history := array.new<ZhongShu>()
+    e.signals := array.new<Signal>()
+    e.divergences := array.new<Divergence>()
+    e.moves := array.new<Move>()
+    e.seeds := array.new<Leg>()
+    e
+
+f_zsCopy(ZhongShu p) =>
+    ZhongShu q = na
+    if not na(p)
+        q := p.copy()
+        q.m := p.m.copy()
+        q.departure := f_legCopy(p.departure)
+        q.up_ref := f_legCopy(p.up_ref)
+        q.down_ref := f_legCopy(p.down_ref)
+    q
+
+f_pointMeta(Leg leg, int id, int side) =>
+    Meta m = f_meta(id, leg.m.end_index, leg.m.end_time, leg.m.end_index, leg.m.end_time, leg.end_price, leg.end_price, false)
+    m.direction := side
+    m
+
+// Remove terminal evidence only; live candidates and the B2 anchor survive pruning.
+method trimEvidence(PivotEngine self) =>
+    while self.signals.size() > 120
+        int removeAt = na
+        for i = 0 to self.signals.size() - 1
+            Signal s = self.signals.get(i)
+            bool anchor = not na(self.firstAnchor) and s.m.id == self.firstAnchor.m.id
+            if s.state != Life.candidate and not anchor
+                removeAt := i
+                break
+        if na(removeAt)
+            break
+        self.signals.remove(removeAt)
+    while self.divergences.size() > 120
+        int removeAt = na
+        for i = 0 to self.divergences.size() - 1
+            if self.divergences.get(i).state != Life.candidate
+                removeAt := i
+                break
+        if na(removeAt)
+            break
+        self.divergences.remove(removeAt)
+    while self.history.size() > 80
+        self.history.shift()
+    while self.moves.size() > 80
+        self.moves.shift()
+    0
+
+f_signalEvent(Signal s, array<Event> events) =>
+    f_emit(events, "signal", s.level, s.side, s.signal_class, s.state, s.m.id, s.m.bar_index, s.m.timestamp, s.m.low, s.reason)
+
+f_divEvent(Divergence d, array<Event> events) =>
+    f_emit(events, "divergence", d.level, d.side, 0, d.state, d.m.id, d.m.bar_index, d.m.timestamp, d.current_price, d.reason)
+
+// Confirmed is terminal. Only mutable candidates may transition or move anchor.
+f_signalFinish(Signal s, Life state, string reason, array<Event> events) =>
+    if not na(s) and s.state == Life.candidate
+        s.state := state
+        s.reason := reason
+        s.m.confirmed := state == Life.confirmed
+        if state == Life.confirmed
+            s.m.confirmed_at_index := bar_index
+            s.m.confirmed_at_time := na(time_close) ? time : time_close
+        else if state == Life.invalidated
+            s.invalidated_at_index := bar_index
+        f_signalEvent(s, events)
+    0
+
+f_divFinish(Divergence d, Life state, string reason, array<Event> events) =>
+    if not na(d) and d.state == Life.candidate
+        d.state := state
+        d.reason := reason
+        d.m.confirmed := state == Life.confirmed
+        if state == Life.confirmed
+            d.m.confirmed_at_index := bar_index
+            d.m.confirmed_at_time := na(time_close) ? time : time_close
+        else if state == Life.invalidated
+            d.invalidated_at_index := bar_index
+        f_divEvent(d, events)
+    0
+
+method newSignal(PivotEngine self, Leg leg, int side, int cls, int pivotId, int divId, int priorId, float key, string reason, array<Event> events) =>
+    Signal s = Signal.new()
+    s.m := f_pointMeta(leg, self.next_signal_id, side)
+    self.next_signal_id += 1
+    s.level := self.level
+    s.side := side
+    s.signal_class := cls
+    s.pivot_id := pivotId
+    s.divergence_id := divId
+    s.prior_signal_id := priorId
+    s.key_price := key
+    s.retest_id := cls == 1 ? 0 : leg.m.id
+    s.source_leg_id := leg.m.id
+    s.source_frozen := leg.m.confirmed
+    s.reason := reason
+    self.signals.push(s)
+    f_signalEvent(s, events)
+    s
+
+f_signalUpdate(Signal s, Leg leg, string reason, array<Event> events) =>
+    if not na(s) and s.state == Life.candidate
+        bool changed = s.m.end_index != leg.m.end_index or s.m.low != leg.end_price or s.reason != reason
+        s.m := f_pointMeta(leg, s.m.id, s.side)
+        s.source_leg_id := leg.m.id
+        s.retest_id := s.signal_class == 1 ? 0 : leg.m.id
+        s.source_frozen := leg.m.confirmed
+        s.reason := reason
+        if changed
+            f_signalEvent(s, events)
+    0
+
+f_pivotRelation(ZhongShu previous, ZhongShu current) =>
+    int direction = 0
+    if not na(previous) and not na(current)
+        direction := current.zd > previous.zg ? 1 : current.zg < previous.zd ? -1 : 0
+    direction
+
+// Directional magnitudes over complete endpoint ranges. Composite mode requires
+// area AND DIF decay, with no increase in histogram peak. Equal force is not DIV.
+f_momentumDecay(Leg a, Leg b) =>
+    bool complete = not na(a) and not na(b) and not na(a.mom) and not na(b.mom)
+    if complete
+        complete := a.mom.complete and b.mom.complete and a.mom.bars > 0 and b.mom.bars > 0
+    float ar = na
+    float pr = na
+    float hr = na
+    bool decayed = false
+    string why = "MACD结构统计不足 / insufficientHistory"
+    if complete
+        ar := a.mom.area > 0 ? b.mom.area / a.mom.area : na
+        pr := a.mom.peak > 0 ? b.mom.peak / a.mom.peak : na
+        hr := a.mom.hist_peak > 0 ? b.mom.hist_peak / a.mom.hist_peak : na
+        bool areaOk = not na(ar) and ar < 1.0 and ar <= divRatio
+        bool peakOk = not na(pr) and pr < 1.0 and pr <= divRatio
+        bool histOk = not na(hr) and hr <= 1.0
+        decayed := divAlgorithm == "MACD柱面积" ? areaOk : divAlgorithm == "DIF峰值" ? peakOk : areaOk and peakOk and histOk
+        why := "area=" + str.tostring(ar, "#.###") + " DIF=" + str.tostring(pr, "#.###") + " hist=" + str.tostring(hr, "#.###") + " threshold=" + str.tostring(divRatio, "#.##") + (decayed ? " 力度衰减" : " 无有效力度衰减")
+    [decayed, ar, pr, hr, why]
+
+method cancelDivergence(PivotEngine self, string why, array<Event> events) =>
+    f_divFinish(self.pendingDiv, Life.invalidated, why, events)
+    f_signalFinish(self.pending1, Life.invalidated, why, events)
+    self.pendingDiv := na
+    self.pending1 := na
+    self.reason1 := "No B1/S1: " + why
+    0
+
+// Consume the first B2 pullback once; failure cannot be replaced by a later low.
+method secondPoint(PivotEngine self, Leg leg, bool frozen, array<Event> events) =>
+    if self.second_stage == 2 and not na(self.firstAnchor)
+        Signal anchor = self.firstAnchor
+        if leg.m.direction == -anchor.side and leg.m.id > self.rebound_id
+            bool standard = anchor.side == 1 ? leg.m.low >= anchor.key_price : leg.m.high <= anchor.key_price
+            float keyScale = math.max(math.abs(anchor.key_price), syminfo.mintick)
+            float excursion = anchor.side == 1 ? (anchor.key_price - leg.m.low) / keyScale : (leg.m.high - anchor.key_price) / keyScale
+            ZhongShu p = self.active
+            bool samePivot = not na(p) and p.m.id == anchor.pivot_id
+            bool remainsOutside = samePivot and (anchor.side == 1 ? leg.m.high < p.zd : leg.m.low > p.zg)
+            bool special = videoSpecialB2 and not standard and excursion > 0 and excursion <= specialB2Tolerance and remainsOutside
+            bool holds = standard or special
+            string mode = special ? "special B2/S2" : "standard B2/S2"
+            string why = mode + " first retest=" + f_num(leg.end_price) + "; B1/S1 key=" + f_num(anchor.key_price) + "; excursion=" + str.tostring(excursion * 100, "#.###") + "%; prior1=" + str.tostring(anchor.m.id) + "; rebound=" + str.tostring(self.rebound_id) + (special ? "; remains outside ZS" + str.tostring(p.m.id) : "")
+            if holds
+                if na(self.pending2)
+                    self.pending2 := self.newSignal(leg, anchor.side, 2, anchor.pivot_id, anchor.divergence_id, anchor.m.id, anchor.key_price, why + "; 等待首次回抽冻结", events)
+                else
+                    f_signalUpdate(self.pending2, leg, why + "; 等待首次回抽冻结", events)
+                if frozen
+                    f_signalFinish(self.pending2, Life.confirmed, why + "; 首次回抽结构已确认", events)
+                    self.pending2 := na
+                    self.second_stage := 0
+                    self.firstAnchor := na
+                self.reason2 := why + (frozen ? "; confirmed=true" : "; candidate")
+            else
+                string fail = "首次回抽破坏一类点关键价 " + f_num(anchor.key_price)
+                f_signalFinish(self.pending2, Life.invalidated, fail, events)
+                self.pending2 := na
+                self.reason2 := "No B2/S2: " + fail
+                if frozen
+                    self.second_stage := 0
+                    self.firstAnchor := na
+    0
+
+method thirdPoint(PivotEngine self, Leg leg, bool frozen, array<Event> events) =>
+    ZhongShu p = self.active
+    if not na(p) and not na(p.departure) and p.state != PivotState.completed
+        int side = p.departure.m.direction
+        if leg.m.direction == -side and leg.m.id > p.departure.m.id
+            bool holds = side == 1 ? leg.m.low > p.zg : leg.m.high < p.zd
+            float bound = side == 1 ? p.zg : p.zd
+            string why = "B3/S3 ZS" + str.tostring(p.m.id) + " departure=" + str.tostring(p.departure_id) + " first retest=" + str.tostring(leg.m.id) + "; " + f_num(side == 1 ? leg.m.low : leg.m.high) + (side == 1 ? " > ZG=" : " < ZD=") + f_num(bound)
+            if holds
+                if na(self.pending3)
+                    self.pending3 := self.newSignal(leg, side, 3, p.m.id, 0, 0, bound, why + "; 等待回抽冻结", events)
+                else
+                    f_signalUpdate(self.pending3, leg, why + "; 等待回抽冻结", events)
+                if frozen
+                    f_signalFinish(self.pending3, Life.confirmed, why + "; confirmed=true", events)
+                    self.pending3 := na
+                self.reason3 := why + (frozen ? "; confirmed=true" : "; candidate")
+            else
+                f_signalFinish(self.pending3, Life.invalidated, "首次回抽进入或接触中枢；ZG=" + f_num(p.zg) + " ZD=" + f_num(p.zd), events)
+                self.pending3 := na
+                self.reason3 := "No B3/S3: retest entered/touched pivot; " + f_num(side == 1 ? leg.m.low : leg.m.high)
+    0
+
+// B1 requires two established centers and a completed exit comparison, followed
+// by a frozen reversal. Reentering the center does not invalidate that reversal.
+// Consolidation DIV is separate and cannot promote itself into a first-class point.
+method finishDivergence(PivotEngine self, Leg reversal, array<Event> events) =>
+    Divergence d = self.pendingDiv
+    if not na(d) and d.source_frozen and reversal.m.id > d.current_leg_id and reversal.m.direction == d.side
+        f_divFinish(d, Life.confirmed, d.reason + "; 反向确认结构=" + str.tostring(reversal.m.id), events)
+        if d.kind == "趋势背驰" and not na(self.pending1)
+            Signal first = self.pending1
+            f_signalFinish(first, Life.confirmed, first.reason + "; 两同级中枢成立且反向结构=" + str.tostring(reversal.m.id), events)
+            f_signalFinish(self.pending2, Life.invalidated, "新确认一类点重置首次回抽追踪", events)
+            self.pending2 := na
+            self.firstAnchor := first
+            self.rebound_id := reversal.m.id
+            self.second_stage := 2
+            self.reason1 := first.reason
+            self.reason2 := "等待一类点后首次回抽；反弹结构=" + str.tostring(reversal.m.id)
+        self.pendingDiv := na
+        self.pending1 := na
+    0
+
+method examineDivergence(PivotEngine self, Leg leg, array<Event> events) =>
+    ZhongShu p = self.active
+    if not na(p) and p.state != PivotState.completed
+        int direction = leg.m.direction
+        bool leaving = direction == 1 ? leg.end_price > p.zg : leg.end_price < p.zd
+        int relative = f_pivotRelation(self.previous, p)
+        bool trendCase = relative == direction and not na(self.previous) and not na(self.previous.departure) and self.previous.departure.m.direction == direction
+        Leg reference = trendCase ? self.previous.departure : direction == 1 ? p.up_ref : p.down_ref
+        bool newExtreme = not na(reference) and (direction == 1 ? leg.end_price > reference.end_price : leg.end_price < reference.end_price)
+        bool comparable = leaving and not na(reference) and reference.m.id < leg.m.id and reference.m.direction == direction
+        [weak, ar, pr, hr, strengthReason] = f_momentumDecay(reference, leg)
+        bool eligible = comparable and newExtreme and weak
+        string kind = trendCase ? "趋势背驰" : "盘整背驰"
+        string why = kind + " ZS" + str.tostring(p.m.id) + "; legs " + (na(reference) ? "?" : str.tostring(reference.m.id)) + "→" + str.tostring(leg.m.id) + "; " + (na(reference) ? "" : f_num(reference.end_price) + "→") + f_num(leg.end_price) + "; " + strengthReason
+        // Preserve a frozen exit while its opposite preview is still forming.
+        bool mayReplace = na(self.pendingDiv) or not self.pendingDiv.source_frozen or self.pendingDiv.current_leg_id == leg.m.id
+        if mayReplace
+            if eligible
+                if not na(self.pendingDiv) and (self.pendingDiv.current_leg_id != leg.m.id or self.pendingDiv.kind != kind)
+                    self.cancelDivergence("候选离开结构或背驰类型改变", events)
+                if na(self.pendingDiv)
+                    Divergence d = Divergence.new()
+                    d.m := f_pointMeta(leg, self.next_div_id, -direction)
+                    self.next_div_id += 1
+                    d.level := self.level
+                    d.side := -direction
+                    d.kind := kind
+                    d.reference_leg_id := reference.m.id
+                    d.current_leg_id := leg.m.id
+                    d.previous_pivot_id := trendCase ? self.previous.m.id : 0
+                    d.pivot_id := p.m.id
+                    d.reference_price := reference.end_price
+                    d.current_price := leg.end_price
+                    d.area_ratio := ar
+                    d.peak_ratio := pr
+                    d.hist_ratio := hr
+                    d.source_frozen := leg.m.confirmed
+                    d.reason := why
+                    self.divergences.push(d)
+                    self.pendingDiv := d
+                    f_divEvent(d, events)
+                    if trendCase
+                        self.pending1 := self.newSignal(leg, -direction, 1, p.m.id, d.m.id, 0, leg.end_price, why + "; 等待反向确认结构", events)
+                else
+                    Divergence d = self.pendingDiv
+                    bool changed = d.current_price != leg.end_price or d.m.end_index != leg.m.end_index or d.reason != why
+                    d.m := f_pointMeta(leg, d.m.id, d.side)
+                    d.current_price := leg.end_price
+                    d.area_ratio := ar
+                    d.peak_ratio := pr
+                    d.hist_ratio := hr
+                    d.source_frozen := leg.m.confirmed
+                    d.reason := why
+                    if changed
+                        f_divEvent(d, events)
+                    if not na(self.pending1)
+                        f_signalUpdate(self.pending1, leg, why + "; 等待反向确认结构", events)
+                        self.pending1.key_price := leg.end_price
+                self.reason1 := trendCase ? why + "; 一类点候选，等待反向冻结" : "No B1/S1: 仅盘整背驰，缺少两同级分离中枢趋势证据"
+            else
+                if not na(self.pendingDiv) and self.pendingDiv.current_leg_id == leg.m.id
+                    self.cancelDivergence("候选未继续满足价格新极值或力度衰减", events)
+                self.reason1 := not leaving ? "No B1/S1: 尚未沿趋势离开中枢" : not trendCase ? "No B1/S1: 不足两个同级分离中枢和可比较离开结构" : not newExtreme ? "No B1/S1: 价格未创新高/低" : "No B1/S1: " + strengthReason
+    0
+
+method seedPivot(PivotEngine self, array<Event> events) =>
+    if self.seeds.size() == 3
+        Leg a = self.seeds.get(0)
+        Leg b = self.seeds.get(1)
+        Leg c = self.seeds.get(2)
+        [zd, zg] = f_overlap3(a, b, c)
+        if zg > zd
+            ZhongShu p = ZhongShu.new()
+            p.m := f_meta(self.next_pivot_id, a.m.start_index, a.m.start_time, c.m.end_index, c.m.end_time, zd, zg, true)
+            self.next_pivot_id += 1
+            p.level := self.level
+            p.zd := zd
+            p.zg := zg
+            p.gg := math.max(a.m.high, math.max(b.m.high, c.m.high))
+            p.dd := math.min(a.m.low, math.min(b.m.low, c.m.low))
+            p.m.high := p.gg
+            p.m.low := p.dd
+            p.m.direction := 0
+            p.seed1 := a.m.id
+            p.seed2 := b.m.id
+            p.seed3 := c.m.id
+            p.last_member_id := c.m.id
+            p.state := PivotState.confirmed
+            p.reason := "seed=" + str.tostring(p.seed1) + "," + str.tostring(p.seed2) + "," + str.tostring(p.seed3) + "; ZD=max(low)=" + f_num(zd) + "; ZG=min(high)=" + f_num(zg)
+            for i = 0 to 2
+                Leg x = self.seeds.get(i)
+                if x.m.direction == 1
+                    p.up_ref := f_legCopy(x)
+                else
+                    p.down_ref := f_legCopy(x)
+            self.active := p
+            int provisional = f_pivotRelation(self.previous, p)
+            self.trend := provisional
+            self.moveType := provisional == 1 ? "上涨趋势进行中" : provisional == -1 ? "下跌趋势进行中" : "盘整进行中"
+            self.reason := p.reason
+            self.reason3 := "No B3/S3: 中枢已成立，等待离开和首次反向回抽"
+            f_emit(events, "pivot", self.level, 0, 0, Life.confirmed, p.m.id, p.m.end_index, p.m.end_time, (zg + zd) / 2.0, p.reason)
+        else
+            self.reason := "No pivot: 三结构交集为空或仅接触；ZD=" + f_num(zd) + " ZG=" + f_num(zg)
+    0
+
+method completePivot(PivotEngine self, Leg retest, array<Event> events) =>
+    ZhongShu p = self.active
+    p.state := PivotState.completed
+    p.retest_id := retest.m.id
+    p.completed_at_index := bar_index
+    p.completed_at_time := na(time_close) ? time : time_close
+    p.reason += "; completed by first outside retest=" + str.tostring(retest.m.id)
+    ZhongShu snapshot = f_zsCopy(p)
+    int direction = f_pivotRelation(self.previous, snapshot)
+    self.trend := direction
+    self.moveType := direction == 1 ? "上涨趋势" : direction == -1 ? "下跌趋势" : na(self.previous) ? "盘整（单中枢完成）" : "中枢重叠 / 走势边界待定"
+    Move move = Move.new()
+    move.m := snapshot.m.copy()
+    move.m.id := self.next_move_id
+    self.next_move_id += 1
+    move.m.direction := direction
+    move.m.confirmed_at_index := bar_index
+    move.m.confirmed_at_time := na(time_close) ? time : time_close
+    move.level := self.level
+    move.direction := direction
+    move.first_pivot_id := direction != 0 ? self.previous.m.id : snapshot.m.id
+    move.last_pivot_id := snapshot.m.id
+    move.pivot_count := direction != 0 ? 2 : 1
+    move.kind := self.moveType
+    move.reason := direction != 0 ? "两个完成同级中枢严格分离：" + str.tostring(self.previous.m.id) + "→" + str.tostring(snapshot.m.id) : na(self.previous) ? "首个中枢在首次不回枢回抽确认处完成" : "相邻完成中枢重叠；不推断为完成盘整或趋势"
+    if direction != 0
+        move.m.start_index := self.previous.m.start_index
+        move.m.start_time := self.previous.m.start_time
+        move.m.high := math.max(self.previous.gg, snapshot.gg)
+        move.m.low := math.min(self.previous.dd, snapshot.dd)
+    // Multiple overlapping centers are not a proven one-center consolidation.
+    if direction != 0 or na(self.previous)
+        self.moves.push(move)
+    self.history.push(snapshot)
+    self.previous := snapshot
+    // Old center members cannot seed repeated every-three-leg copies.
+    self.seeds.clear()
+    self.seeds.push(f_legCopy(p.departure))
+    self.seeds.push(f_legCopy(retest))
+    self.reason := p.reason
+    f_emit(events, "pivot", self.level, p.departure.m.direction, 0, Life.confirmed, p.m.id, p.m.end_index, p.m.end_time, (p.zg + p.zd) / 2.0, p.reason)
+    0
+
+method onLeg(PivotEngine self, Leg frozen, array<Event> events) =>
+    int result = 0
+    if not self.halted and not na(frozen) and frozen.m.id > self.last_leg_id
+        bool valid = frozen.m.confirmed and frozen.m.direction != 0 and not na(frozen.start_price) and not na(frozen.end_price)
+        if valid and not na(self.last_leg)
+            valid := frozen.m.start_index == self.last_leg.m.end_index and frozen.start_price == self.last_leg.end_price and frozen.m.direction == -self.last_leg.m.direction and frozen.m.end_index > self.last_leg.m.end_index
+        if not valid
+            self.halted := true
+            self.reason := "该级暂停：输入不是连续、交替、端点递增的冻结结构"
+            self.cancelDivergence(self.reason, events)
+            f_signalFinish(self.pending2, Life.invalidated, self.reason, events)
+            f_signalFinish(self.pending3, Life.invalidated, self.reason, events)
+        else
+            self.last_leg_id := frozen.m.id
+            self.last_leg := f_legCopy(frozen)
+            self.previewPivot := na
+            if enableSignals
+                self.secondPoint(frozen, true, events)
+                self.thirdPoint(frozen, true, events)
+            bool hadActive = not na(self.active) and self.active.state != PivotState.completed
+            if not hadActive
+                self.seeds.push(f_legCopy(frozen))
+                if self.seeds.size() > 3
+                    self.seeds.shift()
+                self.seedPivot(events)
+            else
+                ZhongShu p = self.active
+                p.gg := math.max(p.gg, frozen.m.high)
+                p.dd := math.min(p.dd, frozen.m.low)
+                p.m.high := p.gg
+                p.m.low := p.dd
+                p.m.end_index := frozen.m.end_index
+                p.m.end_time := frozen.m.end_time
+                p.m.bar_index := frozen.m.end_index
+                p.m.timestamp := frozen.m.end_time
+                bool waitingRetest = not na(p.departure)
+                if waitingRetest and frozen.m.direction == -p.departure.m.direction
+                    bool outside = p.departure.m.direction == 1 ? frozen.m.low > p.zg : frozen.m.high < p.zd
+                    p.retest_id := frozen.m.id
+                    if outside
+                        self.completePivot(frozen, events)
+                        result := 1
+                    else
+                        p.state := PivotState.extending
+                        p.last_member_id := frozen.m.id
+                        p.reason := "first retest=" + str.tostring(frozen.m.id) + " returned/touched pivot; ZD/ZG fixed"
+                        p.departure := na
+                        p.departure_id := 0
+                        f_emit(events, "return", self.level, frozen.m.direction, 0, Life.confirmed, frozen.m.id, frozen.m.end_index, frozen.m.end_time, frozen.end_price, p.reason)
+                else
+                    bool up = frozen.m.direction == 1 and frozen.end_price > p.zg
+                    bool down = frozen.m.direction == -1 and frozen.end_price < p.zd
+                    if up or down
+                        p.departure := f_legCopy(frozen)
+                        p.departure_id := frozen.m.id
+                        p.retest_id := 0
+                        p.state := up ? PivotState.leavingUp : PivotState.leavingDown
+                        p.reason := "ZS" + str.tostring(p.m.id) + " frozen departure=" + str.tostring(frozen.m.id) + "; 等待首次反向结构"
+                        self.reason3 := "No B3/S3: 突破本身不构成三类点，等待首次回抽"
+                        f_emit(events, "leave", self.level, up ? 1 : -1, 0, Life.confirmed, frozen.m.id, frozen.m.end_index, frozen.m.end_time, frozen.end_price, p.reason)
+                    else
+                        p.state := PivotState.extending
+                        p.last_member_id := frozen.m.id
+                        p.reason := "extends ZS" + str.tostring(p.m.id) + "; 固定 ZD=" + f_num(p.zd) + " ZG=" + f_num(p.zg)
+                self.reason := p.reason
+            if enableSignals
+                self.finishDivergence(frozen, events)
+                if hadActive and self.active.state != PivotState.completed
+                    self.examineDivergence(frozen, events)
+            if not na(self.active) and self.active.state != PivotState.completed
+                if frozen.m.direction == 1
+                    self.active.up_ref := f_legCopy(frozen)
+                else
+                    self.active.down_ref := f_legCopy(frozen)
+            self.trimEvidence()
+    result
+
+// Preview never enters seeds, establishes a center, or freezes evidence.
+method onPreview(PivotEngine self, Leg candidate, array<Event> events) =>
+    self.previewPivot := na
+    if not self.halted
+        if na(candidate)
+            if not na(self.pendingDiv) and not self.pendingDiv.source_frozen
+                self.cancelDivergence("候选输入消失或重建", events)
+            if not na(self.pending2) and not self.pending2.source_frozen
+                f_signalFinish(self.pending2, Life.invalidated, "候选回抽消失或重建", events)
+                self.pending2 := na
+            if not na(self.pending3) and not self.pending3.source_frozen
+                f_signalFinish(self.pending3, Life.invalidated, "候选回抽消失或重建", events)
+                self.pending3 := na
+        else if candidate.m.direction != 0 and not candidate.m.confirmed
+            if not na(self.active) and self.active.state != PivotState.completed
+                self.previewPivot := f_zsCopy(self.active)
+                ZhongShu preview = self.previewPivot
+                preview.m.end_index := candidate.m.end_index
+                preview.m.end_time := candidate.m.end_time
+                if not na(preview.departure) and candidate.m.direction == -preview.departure.m.direction
+                    preview.state := preview.departure.m.direction == 1 ? PivotState.retestingUp : PivotState.retestingDown
+                else if candidate.m.direction == 1 and candidate.end_price > preview.zg
+                    preview.state := PivotState.leavingUp
+                else if candidate.m.direction == -1 and candidate.end_price < preview.zd
+                    preview.state := PivotState.leavingDown
+            if enableSignals
+                self.secondPoint(candidate, false, events)
+                self.thirdPoint(candidate, false, events)
+                self.examineDivergence(candidate, events)
+            self.trimEvidence()
+    0
+
+// Shared bounded renderer. Reusing the oldest slot is display pruning only.
+type LinePool
+    array<line> ids
+    int cursor = 0
+    int capacity = 360
+
+type MarkPool
+    array<string> keys
+    array<label> ids
+    int cursor = 0
+    int capacity = 400
+
+type RangePool
+    array<string> keys
+    array<box> ids
+    int cursor = 0
+    int capacity = 160
+
+f_newLinePool() =>
+    LinePool.new(array.new<line>(), 0, 360)
+
+f_newMarkPool() =>
+    MarkPool.new(array.new<string>(), array.new<label>(), 0, 400)
+
+f_newRangePool(int capacity) =>
+    RangePool.new(array.new<string>(), array.new<box>(), 0, capacity)
+
+method leg(LinePool self, Leg value, bool segment) =>
+    line obj = na
+    if self.ids.size() < self.capacity
+        obj := line.new(value.m.start_time, value.start_price, value.m.end_time, value.end_price, xloc = xloc.bar_time)
+        self.ids.push(obj)
+    else
+        obj := self.ids.get(self.cursor)
+        self.cursor := (self.cursor + 1) % self.capacity
+    line.set_xy1(obj, value.m.start_time, value.start_price)
+    line.set_xy2(obj, value.m.end_time, value.end_price)
+    line.set_width(obj, segment ? segmentWidth : strokeWidth)
+    line.set_color(obj, segment ? segmentColor : monochrome ? strokeColor : value.m.direction == 1 ? riseColor : fallColor)
+    line.set_style(obj, line.style_solid)
+    obj
+
+method mark(MarkPool self, string key, int ts, float price, string caption, string tooltip, color ink, bool above, Life state) =>
+    int slot = self.keys.indexof(key)
+    label obj = na
+    if slot >= 0
+        obj := self.ids.get(slot)
+    else if self.ids.size() < self.capacity
+        obj := label.new(ts, price, "", xloc = xloc.bar_time)
+        self.ids.push(obj)
+        self.keys.push(key)
+    else
+        slot := self.cursor
+        obj := self.ids.get(slot)
+        self.keys.set(slot, key)
+        self.cursor := (self.cursor + 1) % self.capacity
+    label.set_xy(obj, ts, price)
+    label.set_text(obj, caption)
+    label.set_tooltip(obj, tooltip)
+    label.set_style(obj, above ? label.style_label_down : label.style_label_up)
+    label.set_color(obj, color.new(ink, math.max(color.t(ink), state == Life.candidate ? 82 : state == Life.invalidated ? 92 : 10)))
+    label.set_textcolor(obj, state == Life.confirmed ? color.new(color.white, color.t(ink)) : ink)
+    label.set_size(obj, labelSize)
+    obj
+
+method erase(MarkPool self, string key) =>
+    int slot = self.keys.indexof(key)
+    if slot >= 0
+        // Keep the object ID available for pool reuse, with empty caption/coordinates.
+        label obj = self.ids.get(slot)
+        label.set_text(obj, "")
+        label.set_xy(obj, time, na)
+    0
+
+method drawRange(RangePool self, string key, int startTime, int endTime, float hi, float lo, color ink, string caption, bool confirmed) =>
+    int slot = self.keys.indexof(key)
+    box obj = na
+    if slot >= 0
+        obj := self.ids.get(slot)
+    else if self.ids.size() < self.capacity
+        obj := box.new(startTime, hi, endTime, lo, xloc = xloc.bar_time)
+        self.ids.push(obj)
+        self.keys.push(key)
+    else
+        slot := self.cursor
+        obj := self.ids.get(slot)
+        self.keys.set(slot, key)
+        self.cursor := (self.cursor + 1) % self.capacity
+    box.set_lefttop(obj, startTime, hi)
+    box.set_rightbottom(obj, endTime, lo)
+    box.set_border_color(obj, color.new(ink, confirmed ? 15 : 60))
+    box.set_border_style(obj, confirmed ? line.style_solid : line.style_dashed)
+    box.set_bgcolor(obj, color.new(ink, confirmed ? pivotAlpha : 95))
+    box.set_text(obj, caption)
+    box.set_text_size(obj, size.tiny)
+    box.set_text_color(obj, ink)
+    obj
+
+f_pivotText(ZhongShu z, int level) =>
+    string name = level == 1 ? "ZS-BI-" : "ZS-SEG-"
+    string normal = showBounds ? name + str.tostring(z.m.id) + "\nZG " + f_num(z.zg) + " / ZD " + f_num(z.zd) : ""
+    debug ? normal + "\nGG " + f_num(z.gg) + " / DD " + f_num(z.dd) + "\n" + str.tostring(z.state) : normal
+
+f_drawPivot(RangePool pool, ZhongShu z, int level) =>
+    if not na(z)
+        color ink = level == 1 ? lowPivotColor : highPivotColor
+        pool.drawRange("ZS" + str.tostring(level) + ":" + str.tostring(z.m.id), z.m.start_time, z.m.end_time, z.zg, z.zd, ink, f_pivotText(z, level), z.m.confirmed)
+    0
+
+f_drawPivots(RangePool pool, PivotEngine engine) =>
+    int n = engine.history.size()
+    if n > 0
+        f_drawPivot(pool, engine.history.get(n - 1), engine.level)
+    if not na(engine.active)
+        f_drawPivot(pool, engine.active, engine.level)
+    0
+
+f_eventKey(Event e) =>
+    e.kind + ":" + str.tostring(e.level) + ":" + str.tostring(e.source_id)
+
+f_renderEvent(MarkPool pool, Event e, int bigDirection) =>
+    bool isSignal = e.kind == "signal"
+    bool isDiv = e.kind == "divergence"
+    bool classOn = e.signal_class == 1 ? showClass1 : e.signal_class == 2 ? showClass2 : showClass3
+    bool visible = (isSignal and classOn or isDiv and showDivergence) and enableSignals
+    if e.state == Life.candidate and not showCandidateSignals
+        visible := false
+    string key = f_eventKey(e)
+    if e.state == Life.invalidated and not showInvalidated
+        pool.erase(key)
+    else if visible
+        string prefix = e.level == 1 ? lowPrefix : highPrefix
+        string caption = isDiv ? prefix + " DIV" : prefix + str.tostring(e.signal_class) + (e.side == 1 ? "B" : "S")
+        caption := e.state == Life.candidate ? "○ " + caption : e.state == Life.invalidated ? "X " + caption : caption
+        color ink = e.side == 1 ? (e.signal_class == 2 ? buy2Color : buyColor) : (e.signal_class == 2 ? sell2Color : sellColor)
+        if trendFilter and bigDirection != 0 and e.side != bigDirection
+            ink := color.new(ink, 65)
+        string evidence = e.reason + "\n" + str.tostring(e.state) + "\nendpoint index=" + str.tostring(e.index) + "\nevidence index=" + str.tostring(bar_index) + " / " + str.format_time(time, "yyyy-MM-dd HH:mm")
+        pool.mark(key, e.ts, e.price, caption, evidence, ink, e.side == -1, e.state)
+    0
+
+f_setPreviewLine(line obj, Leg value, bool visible, bool segment) =>
+    if visible and not na(value)
+        line.set_xy1(obj, value.m.start_time, value.start_price)
+        line.set_xy2(obj, value.m.end_time, value.end_price)
+        line.set_color(obj, color.new(segment ? segmentColor : monochrome ? strokeColor : value.m.direction == 1 ? riseColor : fallColor, 45))
+        line.set_width(obj, segment ? segmentWidth : strokeWidth)
+        line.set_style(obj, line.style_dashed)
+    else
+        line.set_xy1(obj, time, na)
+        line.set_xy2(obj, time, na)
+    0
+
+f_cell(table t, int row, string title, string value, bool warning = false) =>
+    table.cell(t, 0, row, title, text_color = color.white, bgcolor = color.new(color.navy, 15), text_size = size.small)
+    table.cell(t, 1, row, value, text_color = warning ? color.orange : color.white, bgcolor = color.new(color.black, 20), text_size = size.small)
+    0
+
+// Deterministic synthetic tests call the SAME production engines as live data.
+f_assert(bool ok, string name) =>
+    if not ok
+        runtime.error("Chan self-test FAILED: " + name)
+    1
+
+f_testLeg(int id, float a, float b, bool confirmed = true, float force = 100.0) =>
+    Meta m = f_meta(id, (id - 1) * 10, (id - 1) * 600000, id * 10, id * 600000, a, b, confirmed)
+    Leg.new(m, a, b, id, id, 1, Momentum.new(force, force, force, 10, true), "synthetic fixture " + str.tostring(id))
+
+f_hasSignal(array<Event> events, int cls, int side, Life state) =>
+    bool found = false
+    int n = events.size()
+    if n > 0
+        for i = 0 to n - 1
+            Event e = events.get(i)
+            if e.kind == "signal" and e.signal_class == cls and e.side == side and e.state == state
+                found := true
+    found
+
+f_fullSelfTest() =>
+    int passed = 0
+    passed += f_assert(f_contains(12, 7, 11, 8) and f_contains(12, 7, 13, 6), "bidirectional containment")
+    passed += f_assert(f_fractalKind(10, 5, 12, 7, 11, 6, true) == 1, "strict top")
+    passed += f_assert(f_fractalKind(12, 7, 10, 5, 11, 6, true) == -1, "strict bottom")
+    passed += f_assert(f_fractalKind(10, 5, 12, 4, 11, 6, true) == 0, "high alone is not top")
+    [zd, zg] = f_overlap3(f_testLeg(1, 100, 120), f_testLeg(2, 120, 105), f_testLeg(3, 105, 115))
+    passed += f_assert(zd == 105 and zg == 115, "user test 1 ZD=105 ZG=115")
+    array<Event> e = array.new<Event>()
+    PivotEngine p = f_pivotEngine(1)
+    p.onLeg(f_testLeg(1, 100, 115), e)
+    p.onLeg(f_testLeg(2, 115, 95), e)
+    p.onLeg(f_testLeg(3, 95, 110), e)
+    passed += f_assert(p.active.zd == 100 and p.active.zg == 110, "pivot actual seed")
+    p.onLeg(f_testLeg(4, 110, 102), e)
+    passed += f_assert(p.active.m.id == 1 and p.history.size() == 0, "pivot extends without duplicate seed")
+    p.onLeg(f_testLeg(5, 102, 130), e)
+    passed += f_assert(not f_hasSignal(e, 3, 1, Life.confirmed), "breakout alone is NOT B3")
+    if enableSignals
+        p.onPreview(f_testLeg(6, 130, 115, false), e)
+        passed += f_assert(f_hasSignal(e, 3, 1, Life.candidate), "user test 2 B3 candidate at 115")
+    p.onLeg(f_testLeg(6, 130, 115), e)
+    passed += f_assert(p.active.state == PivotState.completed, "outside retest completes pivot")
+    if enableSignals
+        passed += f_assert(f_hasSignal(e, 3, 1, Life.confirmed), "user test 2 B3 confirmed at 115")
+    PivotEngine bad = f_pivotEngine(1)
+    array<Event> be = array.new<Event>()
+    bad.onLeg(f_testLeg(1, 100, 115), be)
+    bad.onLeg(f_testLeg(2, 115, 95), be)
+    bad.onLeg(f_testLeg(3, 95, 110), be)
+    bad.onLeg(f_testLeg(4, 110, 102), be)
+    bad.onLeg(f_testLeg(5, 102, 130), be)
+    bad.onPreview(f_testLeg(6, 130, 115, false), be)
+    bad.onPreview(f_testLeg(6, 130, 105, false), be)
+    bad.onLeg(f_testLeg(6, 130, 105), be)
+    passed += f_assert(not f_hasSignal(be, 3, 1, Life.confirmed) and bad.active.state == PivotState.extending, "user test 3 retest105 rejects B3")
+    if enableSignals
+        passed += f_assert(f_hasSignal(be, 3, 1, Life.invalidated), "B3 candidate invalidated on reentry")
+    [decay, ar, pr, hr, why] = f_momentumDecay(f_testLeg(1, 110, 90, true, 100), f_testLeg(3, 100, 80, true, 40))
+    passed += f_assert(decay and ar == 0.4, "user test 4 new low with reduced negative force")
+    SegmentEngine seg = f_segmentEngine()
+    array<Event> se = array.new<Event>()
+    seg.onStroke(f_testLeg(1, 100, 120), se)
+    seg.onStroke(f_testLeg(2, 120, 105), se)
+    Leg third = seg.onStroke(f_testLeg(3, 105, 125), se)
+    seg.onStroke(f_testLeg(4, 125, 110), se)
+    Leg fifth = seg.onStroke(f_testLeg(5, 110, 130), se)
+    passed += f_assert(na(third) and na(fifth) and seg.pending.size() == 5, "user test 5 five strokes stay one unfinished segment")
+    if enableSignals
+        PivotEngine trend = f_pivotEngine(1)
+        array<Event> te = array.new<Event>()
+        trend.onLeg(f_testLeg(1, 120, 100), te)
+        trend.onLeg(f_testLeg(2, 100, 115), te)
+        trend.onLeg(f_testLeg(3, 115, 105), te)
+        trend.onLeg(f_testLeg(4, 105, 110), te)
+        trend.onLeg(f_testLeg(5, 110, 90, true, 100), te)
+        trend.onLeg(f_testLeg(6, 90, 100), te)
+        trend.onLeg(f_testLeg(7, 100, 80), te)
+        trend.onLeg(f_testLeg(8, 80, 95), te)
+        trend.onPreview(f_testLeg(9, 95, 70, false, 40), te)
+        passed += f_assert(f_hasSignal(te, 1, 1, Life.candidate), "trend B1 candidate requires two pivots and divergence")
+        trend.onLeg(f_testLeg(9, 95, 70, true, 40), te)
+        trend.onLeg(f_testLeg(10, 70, 95), te)
+        passed += f_assert(f_hasSignal(te, 1, 1, Life.confirmed), "B1 locks on reverse structure even when reentering center")
+        trend.onPreview(f_testLeg(11, 95, 75, false), te)
+        trend.onLeg(f_testLeg(11, 95, 75), te)
+        passed += f_assert(f_hasSignal(te, 2, 1, Life.confirmed), "B2 first pullback holds B1 low")
+        if videoSpecialB2
+            PivotEngine specialB2 = f_pivotEngine(1)
+            array<Event> specialEvents = array.new<Event>()
+            specialB2.onLeg(f_testLeg(1, 100, 115), specialEvents)
+            specialB2.onLeg(f_testLeg(2, 115, 95), specialEvents)
+            specialB2.onLeg(f_testLeg(3, 95, 110), specialEvents)
+            Signal anchor = Signal.new()
+            anchor.m := f_pointMeta(f_testLeg(4, 95, 90), 90, 1)
+            anchor.side := 1
+            anchor.signal_class := 1
+            anchor.pivot_id := specialB2.active.m.id
+            anchor.key_price := 90
+            specialB2.firstAnchor := anchor
+            specialB2.second_stage := 2
+            specialB2.rebound_id := 4
+            specialB2.active.state := PivotState.completed
+            specialB2.secondPoint(f_testLeg(5, 95, 90 * (1 - specialB2Tolerance / 2)), true, specialEvents)
+            passed += f_assert(f_hasSignal(specialEvents, 2, 1, Life.confirmed), "video special B2 may slightly cross B1 while remaining outside ZS")
+    PivotEngine touch = f_pivotEngine(2)
+    array<Event> touchEvents = array.new<Event>()
+    touch.onLeg(f_testLeg(1, 100, 115), touchEvents)
+    touch.onLeg(f_testLeg(2, 115, 95), touchEvents)
+    touch.onLeg(f_testLeg(3, 95, 110), touchEvents)
+    touch.onLeg(f_testLeg(4, 110, 102), touchEvents)
+    touch.onLeg(f_testLeg(5, 102, 130), touchEvents)
+    touch.onLeg(f_testLeg(6, 130, 110), touchEvents)
+    passed += f_assert(not f_hasSignal(touchEvents, 3, 1, Life.confirmed), "touch ZG is not B3")
+    passed += f_assert(not f_hasSignal(touchEvents, 2, 1, Life.confirmed), "no B2 without confirmed B1")
+    PivotEngine mirrored = f_pivotEngine(2)
+    array<Event> mirrorEvents = array.new<Event>()
+    mirrored.onLeg(f_testLeg(1, -100, -115), mirrorEvents)
+    mirrored.onLeg(f_testLeg(2, -115, -95), mirrorEvents)
+    mirrored.onLeg(f_testLeg(3, -95, -110), mirrorEvents)
+    mirrored.onLeg(f_testLeg(4, -110, -102), mirrorEvents)
+    mirrored.onLeg(f_testLeg(5, -102, -130), mirrorEvents)
+    mirrored.onPreview(f_testLeg(6, -130, -115, false), mirrorEvents)
+    mirrored.onLeg(f_testLeg(6, -130, -115), mirrorEvents)
+    passed += f_assert(mirrored.active.zd == -110 and mirrored.active.zg == -100, "H pivot mirror boundaries")
+    if enableSignals
+        passed += f_assert(f_hasSignal(mirrorEvents, 3, -1, Life.confirmed), "H3sell mirror of L3buy")
+    SegmentEngine noGap = f_segmentEngine()
+    array<Event> ngEvents = array.new<Event>()
+    array<float> ngPrices = array.from(100.0, 120.0, 110.0, 130.0, 115.0, 125.0, 105.0, 120.0, 100.0)
+    Leg ngResult = na
+    for i = 1 to 8
+        Leg made = noGap.onStroke(f_testLeg(i, ngPrices.get(i - 1), ngPrices.get(i)), ngEvents)
+        if not na(made)
+            ngResult := made
+    passed += f_assert(not na(ngResult) and ngResult.last_child == 3 and ngResult.end_price == 130, "no-gap feature sequence ends at BI3, confirms at BI8")
+    SegmentEngine withGap = f_segmentEngine()
+    array<Event> gapEvents = array.new<Event>()
+    array<float> gapPrices = array.from(100.0, 120.0, 110.0, 140.0, 125.0, 135.0, 115.0, 125.0, 105.0, 120.0, 110.0, 130.0, 115.0, 135.0)
+    Leg gapResult = na
+    for i = 1 to 12
+        Leg made = withGap.onStroke(f_testLeg(i, gapPrices.get(i - 1), gapPrices.get(i)), gapEvents)
+        if not na(made)
+            gapResult := made
+    passed += f_assert(na(gapResult), "gap waits beyond reverse three strokes")
+    gapResult := withGap.onStroke(f_testLeg(13, 115, 135), gapEvents)
+    passed += f_assert(gapConfirm ? not na(gapResult) and gapResult.end_price == 140 : na(gapResult), "gap requires secondary feature fractal or remains unconfirmed")
+    passed
+
+// Phases 13–15: incremental scheduler, event dedup, chart layers and diagnostics.
+var InclusionEngine inclusion = f_inclusionEngine()
+var FractalEngine fractals = FractalEngine.new(array.new<ChanBar>())
+var StrokeEngine strokes = StrokeEngine.new(next_id = 1)
+var SegmentEngine segments = f_segmentEngine()
+var PivotEngine lowEngine = f_pivotEngine(1)
+var PivotEngine highEngine = f_pivotEngine(2)
+var MomentumStore momentum = f_momentumStore(areaWindow + 2)
+var LinePool lines = f_newLinePool()
+var MarkPool marks = f_newMarkPool()
+var RangePool pivotBoxes = f_newRangePool(160)
+var RangePool barBoxes = f_newRangePool(80)
+var RangePool featureBoxes = f_newRangePool(48)
+var line candidateStroke = line.new(time, na, time, na, xloc = xloc.bar_time)
+var line candidateSegment = line.new(time, na, time, na, xloc = xloc.bar_time)
+var box candidateBar = box.new(time, na, time, na, xloc = xloc.bar_time)
+var label candidateFractal = label.new(time, na, "", xloc = xloc.bar_time, style = label.style_none)
+var table dashboard = table.new(position.top_right, 2, 22, border_width = 1)
+var array<string> seenEvents = array.new<string>()
+var int startIndex = math.max(0, last_bar_index - maxHistory + 1)
+var string lastSignal = "None"
+var string lastSignalState = "N/A"
+var string lastDiv = "None"
+var int segmentTotal = 0
+var int fullTestCount = 0
+array<Event> events = array.new<Event>()
+array<bool> alerts = array.new<bool>(19, false)
+[macdDif, macdDea, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+if barstate.isfirst and macdFast >= macdSlow
+    runtime.error("MACD Fast 必须小于 Slow")
+if barstate.isfirst and runTests
+    fullTestCount := f_fullSelfTest()
+
+bool inRange = startMode == "固定时间" ? time >= fixedStart : bar_index >= startIndex
+if barstate.isconfirmed
+    if inRange
+        momentum.sample(bar_index, macdDif, macdHist)
+        ChanBar frozenBar = inclusion.ingest(f_rawBar(bar_index, time, na(time_close) ? time : time_close, high, low))
+        if not na(frozenBar)
+            if showBars
+                string caption = debug ? "CB" + str.tostring(frozenBar.m.id) + " raw " + str.tostring(frozenBar.m.start_index) + "–" + str.tostring(frozenBar.m.end_index) + "\nH@" + str.tostring(frozenBar.high_index) + " L@" + str.tostring(frozenBar.low_index) : ""
+                barBoxes.drawRange("CB" + str.tostring(frozenBar.m.id), frozenBar.m.start_time, frozenBar.m.end_time, frozenBar.m.high, frozenBar.m.low, frozenBar.m.direction == 1 ? riseColor : fallColor, caption, true)
+            Fractal f = fractals.onBar(frozenBar)
+            if not na(f)
+                if showFractals
+                    string caption = (f.kind == 1 ? "▼" : "▲") + (debug ? " F" + str.tostring(f.m.id) : "")
+                    label mark = marks.mark("F" + str.tostring(f.m.id), f.m.timestamp, f.price, caption, "F" + str.tostring(f.m.id) + " CB=" + str.tostring(f.left_seq) + "/" + str.tostring(f.center_seq) + "/" + str.tostring(f.right_seq) + "; frozen at " + str.tostring(f.m.confirmed_at_index), f.kind == 1 ? fallColor : riseColor, f.kind == 1, Life.confirmed)
+                    label.set_style(mark, label.style_none)
+                    label.set_textcolor(mark, f.kind == 1 ? fallColor : riseColor)
+                Leg pen = strokes.onFractal(f)
+                if not na(pen)
+                    pen.mom := momentum.measure(pen)
+                    alerts.set(17, true)
+                    if showStrokes
+                        lines.leg(pen, false)
+                    if debug
+                        marks.mark("BI" + str.tostring(pen.m.id), pen.m.end_time, pen.end_price, "BI" + str.tostring(pen.m.id), pen.reason, pen.m.direction == 1 ? riseColor : fallColor, pen.m.direction == 1, Life.confirmed)
+                    lowEngine.onLeg(pen, events)
+                    Leg segment = segments.onStroke(pen, events)
+                    if not na(segment)
+                        segment.mom := momentum.measure(segment)
+                        segmentTotal += 1
+                        if showSegments
+                            lines.leg(segment, true)
+                        if debug or showFeatureFractals
+                            marks.mark("SEG" + str.tostring(segment.m.id), segment.m.end_time, segment.end_price, "SEG" + str.tostring(segment.m.id), segment.reason, segmentColor, segment.m.direction == 1, Life.confirmed)
+                        highEngine.onLeg(segment, events)
+                    if not na(segments.preview)
+                        segments.preview.mom := momentum.measure(segments.preview)
+                    highEngine.onPreview(not na(segments.preview) and segments.preview.count >= 3 ? segments.preview : na, events)
+                    if showHighPivots
+                        f_drawPivots(pivotBoxes, highEngine)
+                if not na(strokes.preview)
+                    strokes.preview.mom := momentum.measure(strokes.preview)
+                lowEngine.onPreview(strokes.preview, events)
+                if showLowPivots
+                    f_drawPivots(pivotBoxes, lowEngine)
+
+// Same source/state alert fires once. Candidate updates still repaint its own label.
+int eventCount = events.size()
+if eventCount > 0
+    for i = 0 to eventCount - 1
+        Event e = events.get(i)
+        f_renderEvent(marks, e, segments.direction)
+        if e.kind == "signal"
+            lastSignal := (e.level == 1 ? lowPrefix : highPrefix) + str.tostring(e.signal_class) + (e.side == 1 ? "BUY" : "SELL")
+            lastSignalState := str.tostring(e.state)
+        if e.kind == "divergence"
+            lastDiv := e.state == Life.invalidated ? "None / 候选失效" : (e.side == 1 ? "Bull " : "Bear ") + str.tostring(e.state)
+        string stateKey = f_eventKey(e) + ":" + str.tostring(e.state)
+        if not seenEvents.includes(stateKey)
+            seenEvents.push(stateKey)
+            if seenEvents.size() > 1200
+                seenEvents.shift()
+            if e.kind == "signal" and e.state != Life.invalidated
+                int slot = (e.signal_class - 1) * 4 + (e.side == 1 ? 0 : 2) + (e.state == Life.confirmed ? 1 : 0)
+                if slot >= 0 and slot < 12
+                    alerts.set(slot, true)
+            else if e.kind == "divergence" and e.state != Life.invalidated
+                alerts.set(e.side == 1 ? 12 : 13, true)
+            else if e.kind == "leave"
+                alerts.set(e.side == 1 ? 14 : 15, true)
+            else if e.kind == "return"
+                alerts.set(16, true)
+            else if e.kind == "segment"
+                alerts.set(18, true)
+
+if barstate.islast
+    f_setPreviewLine(candidateStroke, strokes.preview, showStrokes and showCandidateStrokes, false)
+    f_setPreviewLine(candidateSegment, segments.preview, showSegments and showCandidateSegments, true)
+    Fractal preview = fractals.previewFractal(inclusion.tail)
+    if showFractals and showCandidateFractals and not na(preview)
+        label.set_xy(candidateFractal, preview.m.timestamp, preview.price)
+        label.set_text(candidateFractal, preview.kind == 1 ? "▽" : "△")
+        label.set_textcolor(candidateFractal, color.new(preview.kind == 1 ? fallColor : riseColor, 45))
+        label.set_size(candidateFractal, labelSize)
+        label.set_tooltip(candidateFractal, "候选分型：右侧处理 K 尚未冻结")
+    else
+        label.set_xy(candidateFractal, time, na)
+        label.set_text(candidateFractal, "")
+    if showBars and not na(inclusion.tail)
+        ChanBar tail = inclusion.tail
+        box.set_lefttop(candidateBar, tail.m.start_time, tail.m.high)
+        box.set_rightbottom(candidateBar, tail.m.end_time, tail.m.low)
+        box.set_border_style(candidateBar, line.style_dashed)
+        box.set_border_color(candidateBar, color.gray)
+        box.set_bgcolor(candidateBar, color.new(color.gray, 95))
+        box.set_text(candidateBar, debug ? "CB" + str.tostring(tail.m.id) + " candidate" : "")
+    else
+        box.set_top(candidateBar, na)
+        box.set_bottom(candidateBar, na)
+    int oldFeatures = featureBoxes.ids.size()
+    if oldFeatures > 0
+        for i = 0 to oldFeatures - 1
+            box b = featureBoxes.ids.get(i)
+            box.set_top(b, na)
+            box.set_bottom(b, na)
+            box.set_text(b, "")
+    int featureCount = segments.features.size()
+    if (showFeatures or showFeatureFractals) and featureCount > 0
+        int firstFeature = math.max(0, featureCount - 48)
+        for i = firstFeature to featureCount - 1
+            FeatureElement x = segments.features.get(i)
+            string fx = x.fractal_kind == 1 ? " ▼" : x.fractal_kind == -1 ? " ▲" : ""
+            string caption = "X" + str.tostring(x.m.id) + (showFeatureFractals ? fx : "") + (debug ? " BI" + str.tostring(x.first_child) + "–" + str.tostring(x.last_child) + (x.gap_before ? " GAP" : "") : "")
+            if showFeatures or x.fractal_kind != 0
+                featureBoxes.drawRange("X" + str.tostring(x.m.id), x.m.start_time, x.m.end_time, x.m.high, x.m.low, segmentColor, caption, x.m.confirmed)
+    // Extending to latest bar changes display only. The seed price band stays fixed.
+    if extendPivots
+        if showLowPivots and not na(lowEngine.active) and lowEngine.active.state != PivotState.completed
+            ZhongShu view = f_zsCopy(lowEngine.active)
+            view.m.end_time := na(time_close) ? time : time_close
+            f_drawPivot(pivotBoxes, view, 1)
+        if showHighPivots and not na(highEngine.active) and highEngine.active.state != PivotState.completed
+            ZhongShu view = f_zsCopy(highEngine.active)
+            view.m.end_time := na(time_close) ? time : time_close
+            f_drawPivot(pivotBoxes, view, 2)
+    if showDashboard
+        string tf = timeframe.isminutes ? (timeframe.multiplier % 60 == 0 ? str.tostring(timeframe.multiplier / 60) + "H" : timeframe.period + "m") : timeframe.period
+        ZhongShu lp = lowEngine.active
+        ZhongShu hp = highEngine.active
+        ZhongShu positionPivot = not na(hp) ? hp : lp
+        string location = na(positionPivot) ? "N/A" : close > positionPivot.zg ? "中枢上方" : close < positionPivot.zd ? "中枢下方" : "中枢内"
+        string movement = not na(hp) ? highEngine.moveType : lowEngine.moveType
+        f_cell(dashboard, 0, "CHAN THEORY", "Structure Pro · " + algoMode)
+        f_cell(dashboard, 1, "周期 / 结构级别", tf + " / L笔 · H线段")
+        f_cell(dashboard, 2, "笔 / 已确认数量", (na(strokes.preview) ? "?" : f_dir(strokes.preview.m.direction)) + " / " + str.tostring(strokes.total))
+        f_cell(dashboard, 3, "线段 / 已确认数量", f_dir(segments.direction) + " candidate / " + str.tostring(segmentTotal))
+        f_cell(dashboard, 4, "走势", movement)
+        f_cell(dashboard, 5, "笔中枢 ZD–ZG", na(lp) ? "N/A" : f_num(lp.zd) + " – " + f_num(lp.zg))
+        f_cell(dashboard, 6, "线段中枢 ZD–ZG", na(hp) ? "N/A" : f_num(hp.zd) + " – " + f_num(hp.zg))
+        f_cell(dashboard, 7, "价格位置", location)
+        f_cell(dashboard, 8, "最近买卖点 / 状态", lastSignal + " / " + lastSignalState)
+        f_cell(dashboard, 9, "MACD / DIV", (macdDif >= 0 ? "Above Zero" : "Below Zero") + " / " + lastDiv)
+        f_cell(dashboard, 10, "笔中枢状态", na(lp) ? "等待三笔重叠" : str.tostring(lp.state))
+        f_cell(dashboard, 11, "线段中枢状态", na(hp) ? "等待三线段重叠" : str.tostring(hp.state))
+        f_cell(dashboard, 12, "引擎 / 自检", (segments.blocked or lowEngine.halted or highEngine.halted ? "有层暂停，见 Debug" : "收盘增量确认") + (runTests ? " / " + str.tostring(fullTestCount) + " PASS" : ""), segments.blocked or lowEngine.halted or highEngine.halted)
+        if debug
+            f_cell(dashboard, 13, "CB / F / 起点跳过", str.tostring(inclusion.total) + " / " + str.tostring(fractals.total) + " / " + str.tostring(inclusion.skipped))
+            f_cell(dashboard, 14, "笔证据", strokes.reason)
+            f_cell(dashboard, 15, "线段证据", segments.reason, segments.blocked)
+            f_cell(dashboard, 16, "L 中枢证据", lowEngine.reason)
+            f_cell(dashboard, 17, "H 中枢证据", highEngine.reason)
+            f_cell(dashboard, 18, "L 一/二类点", lowEngine.reason1 + "\n" + lowEngine.reason2)
+            f_cell(dashboard, 19, "L 三类点", lowEngine.reason3)
+            f_cell(dashboard, 20, "H 一/二/三类点", highEngine.reason1 + "\n" + highEngine.reason2 + "\n" + highEngine.reason3)
+            f_cell(dashboard, 21, "对象 / 特征缓存", str.tostring(lines.ids.size()) + " lines / " + str.tostring(marks.ids.size()) + " labels / X" + str.tostring(featureCount))
+        else
+            table.clear(dashboard, 0, 13, 1, 21)
+    else
+        table.clear(dashboard, 0, 0, 1, 21)
+
+alertcondition(alerts.get(0), "1buy candidate", "Chan L/H 1buy Candidate. Inspect label for level and structural evidence.")
+alertcondition(alerts.get(1), "1buy confirmed", "Chan L/H 1buy Confirmed on this bar; endpoint may be earlier.")
+alertcondition(alerts.get(2), "1sell candidate", "Chan L/H 1sell Candidate. Inspect label for level and structural evidence.")
+alertcondition(alerts.get(3), "1sell confirmed", "Chan L/H 1sell Confirmed on this bar; endpoint may be earlier.")
+alertcondition(alerts.get(4), "2buy candidate", "Chan L/H 2buy Candidate: first pullback after confirmed 1buy.")
+alertcondition(alerts.get(5), "2buy confirmed", "Chan L/H 2buy Confirmed: first pullback holds the 1buy low.")
+alertcondition(alerts.get(6), "2sell candidate", "Chan L/H 2sell Candidate: first rebound after confirmed 1sell.")
+alertcondition(alerts.get(7), "2sell confirmed", "Chan L/H 2sell Confirmed: first rebound holds the 1sell high.")
+alertcondition(alerts.get(8), "3buy candidate", "Chan L/H 3buy Candidate: departure then first retest strictly above ZG.")
+alertcondition(alerts.get(9), "3buy confirmed", "Chan L/H 3buy Confirmed: first retest structure frozen above ZG.")
+alertcondition(alerts.get(10), "3sell candidate", "Chan L/H 3sell Candidate: departure then first retest strictly below ZD.")
+alertcondition(alerts.get(11), "3sell confirmed", "Chan L/H 3sell Confirmed: first retest structure frozen below ZD.")
+alertcondition(alerts.get(12), "Bullish divergence", "Chan L/H bullish structural divergence event. Inspect Candidate/Confirmed state.")
+alertcondition(alerts.get(13), "Bearish divergence", "Chan L/H bearish structural divergence event. Inspect Candidate/Confirmed state.")
+alertcondition(alerts.get(14), "向上离开中枢", "Chan frozen structure left a pivot upward; breakout alone is not 3buy.")
+alertcondition(alerts.get(15), "向下离开中枢", "Chan frozen structure left a pivot downward; breakout alone is not 3sell.")
+alertcondition(alerts.get(16), "回到中枢", "Chan first frozen retest returned to or touched its pivot.")
+alertcondition(alerts.get(17), "新笔确认", "Chan new stroke confirmed on this closed bar.")
+alertcondition(alerts.get(18), "新线段确认", "Chan new segment confirmed with feature/reversal evidence.")

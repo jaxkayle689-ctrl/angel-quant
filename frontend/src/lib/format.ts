@@ -1,0 +1,7 @@
+export function price(value: number | null | undefined) { return value == null || !Number.isFinite(value) ? '—' : value.toLocaleString('zh-CN', { maximumFractionDigits: 2, minimumFractionDigits: 2 }) }
+export function percent(value: number | undefined) { return value == null ? '—' : (value > 0 ? '+' : '') + value.toFixed(2) + '%' }
+export function time(value?: string) { return value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚无数据' }
+export function safeUrl(value?: string) { try { const url = new URL(value || ''); return ['https:', 'http:'].includes(url.protocol) ? url.href : undefined } catch { return undefined } }
+export const summaryLabels: Record<string, string> = { events: '重大消息 / 今晚事件', implied_range: '期权理论隐含区间', core_range: '期权核心博弈区间', option_flow: '期权资金方向', strikes: '主要 Call / Put Strike', upper_liquidity: '上方流动性池', lower_liquidity: '下方流动性池', sweep: '预计优先插针', relative_strength: '板块 / 标的相对强弱', systemic_risk: 'VIX / 系统性风险' }
+export const statusLabel = (value: string) => ({ verified: '已核验', available: '可用', delayed: '延迟数据', partial: '部分数据', estimated: '估算', unavailable: '不可验证', missing: '缺失' }[value] || value)
+export const coinGlass: Record<string, string> = { SNDK: 'https://www.coinglass.com/nl/pro/futures/LiquidationHeatMap?coin=SNDK', MRVL: 'https://www.coinglass.com/currencies/MRVL', SOXL: 'https://www.coinglass.com/currencies/SOXL', NBIS: 'https://www.coinglass.com/liquidations/NBIS' }

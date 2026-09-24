@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+from typing import Any
+
+import pandas as pd
+
+from binance_quant.strategy_api import ChartSeries, Strategy, StrategyContext
+
+
+def _numeric_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if "close_time" not in result.columns:
+        if "open_time" not in result.columns:
+            raise ValueError("策略行情缺少 open_time/close_time。")
+        result["close_time"] = pd.to_datetime(result["open_time"], utc=True)
+    result = result.sort_values("close_time").reset_index(drop=True)
+    for column in ("open", "high", "low", "close", "volume"):
+        result[column] = pd.to_numeric(result[column], errors="coerce")
+    return result
+
+
+def _ema(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False, min_periods=period).mean()
+
+
+def _atr(frame: pd.DataFrame, period: int = 14) -> pd.Series:
+    previous_close = frame["close"].shift(1)
+    true_range = pd.concat(
+        (
+            frame["high"] - frame["low"],
+            (frame["high"] - previous_close).abs(),
+            (frame["low"] - previous_close).abs(),
+        ),
+        axis=1,
+    ).max(axis=1)
+    return true_range.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+
+def _adx(frame: pd.DataFrame, period: int = 14) -> pd.Series:
+    upward = frame["high"].diff()
+    downward = -frame["low"].diff()
+    plus_dm = upward.where((upward > downward) & (upward > 0), 0.0)
+    minus_dm = downward.where((downward > upward) & (downward > 0), 0.0)
+    atr = _atr(frame, period).replace(0, float("nan"))
+    plus_di = 100 * plus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr
+    denominator = (plus_di + minus_di).replace(0, float("nan"))
+    dx = 100 * (plus_di - minus_di).abs() / denominator
+    return dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+
+def _trend_age(condition: pd.Series) -> pd.Series:
+    groups = condition.ne(condition.shift()).cumsum()
+    return (condition.groupby(groups).cumcount() + 1).where(condition, 0)
+
+
+def _asof(left: pd.DataFrame, right: pd.DataFrame, columns: list[str], prefix: str) -> pd.DataFrame:
+    source = right[["close_time", *columns]].rename(columns={column: f"{prefix}{column}" for column in columns})
+    return pd.merge_asof(left.sort_values("close_time"), source.sort_values("close_time"), on="close_time", direction="backward")
+
+
+class MyStrategy(Strategy):
+    strategy_id = "strategy_1"
+    name = "策略1"
+    description = "20倍多周期 EMA 顺势回踩；净 ROI +15% 止盈、-25% 止损。"
+    primary_interval = "1m"
+    required_intervals = ("5m", "15m")
+    history_limit = 320
+    automation_defaults = {"leverage": 20, "allocation_pct": 1, "stop_loss_pct": 25, "take_profit_pct": 15, "daily_max_loss_pct": 3, "risk_unit": "ROI"}
+    version = "2.0.0"
+    market_types = ("crypto_futures",)
+    capabilities = ("long", "short", "portfolio", "fixed_position")
+    backtest_adapter = {"engine": "freqtrade", "strategy_class": "Strategy1", "supports_portfolio": True}
+    parameters = ()
+    chart_series = (ChartSeries("ema7", "EMA7", "#7ab8f5"), ChartSeries("ema25", "EMA25", "#f4c95d"))
+
+    def execution_policy(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        self.normalized_parameters(parameters)
+        return {"minimum_leverage": 20, "entry_order": "MARKET", "protection_mode": "NET_ROI_FIXED", "reverse_on_signal_change": False, "reenter_same_signal": False, "cooldown_candles": 0, "max_trades_per_hour": 60, "max_consecutive_losses": 0, "loss_pause_minutes": 0, "exit_slippage_bps": 1}
+
+    def generate(self, frame: pd.DataFrame, parameters: dict[str, Any]) -> pd.DataFrame:
+        return self.generate_with_context(StrategyContext(frames={"1m": frame, "5m": frame, "15m": frame}, execution_interval="1m"), parameters)
+
+    def generate_with_context(self, context: StrategyContext, parameters: dict[str, Any]) -> pd.DataFrame:
+        self.normalized_parameters(parameters)
+        minute = _numeric_frame(context.frames["1m"])
+        five = _numeric_frame(context.frames["5m"])
+        fifteen = _numeric_frame(context.frames["15m"])
+        minute["ema7"] = _ema(minute["close"], 7)
+        minute["ema25"] = _ema(minute["close"], 25)
+        minute["atr"] = _atr(minute)
+        minute["volume_sma20"] = minute["volume"].rolling(20).mean()
+        five["ema7"] = _ema(five["close"], 7)
+        five["ema25"] = _ema(five["close"], 25)
+        five["ema100"] = _ema(five["close"], 100)
+        five["adx"] = _adx(five)
+        five["atr"] = _atr(five)
+        five["ema25_slope"] = five["ema25"].pct_change(3)
+        five["trend_long"] = (five["ema7"] > five["ema25"]) & (five["ema25"] > five["ema100"]) & (five["ema25_slope"] > 0) & (five["adx"] >= 20.0)
+        five["trend_short"] = (five["ema7"] < five["ema25"]) & (five["ema25"] < five["ema100"]) & (five["ema25_slope"] < 0) & (five["adx"] >= 20.0)
+        fifteen["ema20"] = _ema(fifteen["close"], 20)
+        fifteen["ema60"] = _ema(fifteen["close"], 60)
+        fifteen["adx"] = _adx(fifteen)
+        fifteen["atr"] = _atr(fifteen)
+        fifteen["ema20_slope"] = fifteen["ema20"].pct_change(3)
+        fifteen["trend_long"] = (fifteen["close"] > fifteen["ema60"]) & (fifteen["ema20"] > fifteen["ema60"]) & (fifteen["ema20_slope"] > 0) & (fifteen["adx"] >= 18.0)
+        fifteen["trend_short"] = (fifteen["close"] < fifteen["ema60"]) & (fifteen["ema20"] < fifteen["ema60"]) & (fifteen["ema20_slope"] < 0) & (fifteen["adx"] >= 18.0)
+        fifteen["trend_long_age"] = _trend_age(fifteen["trend_long"])
+        fifteen["trend_short_age"] = _trend_age(fifteen["trend_short"])
+        result = _asof(minute, five, ["close", "ema7", "ema25", "adx", "atr", "trend_long", "trend_short"], "m5_")
+        result = _asof(result, fifteen, ["close", "ema20", "ema60", "adx", "atr", "trend_long", "trend_short", "trend_long_age", "trend_short_age"], "m15_")
+        long_reclaim = (result["close"].shift(1) <= result["ema7"].shift(1)) & (result["close"] > result["ema7"]) & (result["close"] > result["open"])
+        short_reclaim = (result["close"].shift(1) >= result["ema7"].shift(1)) & (result["close"] < result["ema7"]) & (result["close"] < result["open"])
+        long_strength = result["m5_trend_long"].fillna(False) & result["m15_trend_long"].fillna(False) & (result["m5_adx"] >= 30.0) & (result["m15_adx"] >= 25.0) & ((result["m5_ema7"] - result["m5_ema25"]) / result["m5_close"] >= 0.0008) & ((result["m15_ema20"] - result["m15_ema60"]) / result["m15_close"] >= 0.0015)
+        short_strength = result["m5_trend_short"].fillna(False) & result["m15_trend_short"].fillna(False) & (result["m5_adx"] >= 25.0) & (result["m15_adx"] >= 20.0) & ((result["m5_ema25"] - result["m5_ema7"]) / result["m5_close"] >= 0.0008) & ((result["m15_ema60"] - result["m15_ema20"]) / result["m15_close"] >= 0.0015)
+        near_5m = (result["m5_close"] - result["m5_ema7"]).abs() <= result["m5_atr"] * 0.80
+        near_15m = (result["m15_close"] - result["m15_ema20"]).abs() <= result["m15_atr"] * 1.50
+        liquid = (result["volume"] > 0) & (result["volume"] >= result["volume_sma20"])
+        long_setup = (long_strength & long_reclaim & ((result["close"] - result["ema25"]) <= result["atr"] * 0.80) & near_5m & near_15m & result["m15_trend_long_age"].between(1, 16) & liquid).fillna(False)
+        short_setup = (short_strength & short_reclaim & ((result["ema25"] - result["close"]) <= result["atr"] * 0.80) & near_5m & near_15m & result["m15_trend_short_age"].between(1, 16) & liquid).fillna(False)
+        result["signal"] = 0
+        result.loc[long_setup & ~long_setup.shift(1, fill_value=False), "signal"] = 1
+        result.loc[short_setup & ~short_setup.shift(1, fill_value=False), "signal"] = -1
+        result["trend_state"] = "NEUTRAL"
+        result.loc[result["m5_trend_long"].fillna(False) & result["m15_trend_long"].fillna(False), "trend_state"] = "UP"
+        result.loc[result["m5_trend_short"].fillna(False) & result["m15_trend_short"].fillna(False), "trend_state"] = "DOWN"
+        return result
+
+
+STRATEGY = MyStrategy()

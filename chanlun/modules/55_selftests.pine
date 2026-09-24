@@ -1,0 +1,148 @@
+// Deterministic synthetic tests call the SAME production engines as live data.
+f_assert(bool ok, string name) =>
+    if not ok
+        runtime.error("Chan self-test FAILED: " + name)
+    1
+
+f_testLeg(int id, float a, float b, bool confirmed = true, float force = 100.0) =>
+    Meta m = f_meta(id, (id - 1) * 10, (id - 1) * 600000, id * 10, id * 600000, a, b, confirmed)
+    Leg.new(m, a, b, id, id, 1, Momentum.new(force, force, force, 10, true), "synthetic fixture " + str.tostring(id))
+
+f_hasSignal(array<Event> events, int cls, int side, Life state) =>
+    bool found = false
+    int n = events.size()
+    if n > 0
+        for i = 0 to n - 1
+            Event e = events.get(i)
+            if e.kind == "signal" and e.signal_class == cls and e.side == side and e.state == state
+                found := true
+    found
+
+f_fullSelfTest() =>
+    int passed = 0
+    passed += f_assert(f_contains(12, 7, 11, 8) and f_contains(12, 7, 13, 6), "bidirectional containment")
+    passed += f_assert(f_fractalKind(10, 5, 12, 7, 11, 6, true) == 1, "strict top")
+    passed += f_assert(f_fractalKind(12, 7, 10, 5, 11, 6, true) == -1, "strict bottom")
+    passed += f_assert(f_fractalKind(10, 5, 12, 4, 11, 6, true) == 0, "high alone is not top")
+    [zd, zg] = f_overlap3(f_testLeg(1, 100, 120), f_testLeg(2, 120, 105), f_testLeg(3, 105, 115))
+    passed += f_assert(zd == 105 and zg == 115, "user test 1 ZD=105 ZG=115")
+    array<Event> e = array.new<Event>()
+    PivotEngine p = f_pivotEngine(1)
+    p.onLeg(f_testLeg(1, 100, 115), e)
+    p.onLeg(f_testLeg(2, 115, 95), e)
+    p.onLeg(f_testLeg(3, 95, 110), e)
+    passed += f_assert(p.active.zd == 100 and p.active.zg == 110, "pivot actual seed")
+    p.onLeg(f_testLeg(4, 110, 102), e)
+    passed += f_assert(p.active.m.id == 1 and p.history.size() == 0, "pivot extends without duplicate seed")
+    p.onLeg(f_testLeg(5, 102, 130), e)
+    passed += f_assert(not f_hasSignal(e, 3, 1, Life.confirmed), "breakout alone is NOT B3")
+    if enableSignals
+        p.onPreview(f_testLeg(6, 130, 115, false), e)
+        passed += f_assert(f_hasSignal(e, 3, 1, Life.candidate), "user test 2 B3 candidate at 115")
+    p.onLeg(f_testLeg(6, 130, 115), e)
+    passed += f_assert(p.active.state == PivotState.completed, "outside retest completes pivot")
+    if enableSignals
+        passed += f_assert(f_hasSignal(e, 3, 1, Life.confirmed), "user test 2 B3 confirmed at 115")
+    PivotEngine bad = f_pivotEngine(1)
+    array<Event> be = array.new<Event>()
+    bad.onLeg(f_testLeg(1, 100, 115), be)
+    bad.onLeg(f_testLeg(2, 115, 95), be)
+    bad.onLeg(f_testLeg(3, 95, 110), be)
+    bad.onLeg(f_testLeg(4, 110, 102), be)
+    bad.onLeg(f_testLeg(5, 102, 130), be)
+    bad.onPreview(f_testLeg(6, 130, 115, false), be)
+    bad.onPreview(f_testLeg(6, 130, 105, false), be)
+    bad.onLeg(f_testLeg(6, 130, 105), be)
+    passed += f_assert(not f_hasSignal(be, 3, 1, Life.confirmed) and bad.active.state == PivotState.extending, "user test 3 retest105 rejects B3")
+    if enableSignals
+        passed += f_assert(f_hasSignal(be, 3, 1, Life.invalidated), "B3 candidate invalidated on reentry")
+    [decay, ar, pr, hr, why] = f_momentumDecay(f_testLeg(1, 110, 90, true, 100), f_testLeg(3, 100, 80, true, 40))
+    passed += f_assert(decay and ar == 0.4, "user test 4 new low with reduced negative force")
+    SegmentEngine seg = f_segmentEngine()
+    array<Event> se = array.new<Event>()
+    seg.onStroke(f_testLeg(1, 100, 120), se)
+    seg.onStroke(f_testLeg(2, 120, 105), se)
+    Leg third = seg.onStroke(f_testLeg(3, 105, 125), se)
+    seg.onStroke(f_testLeg(4, 125, 110), se)
+    Leg fifth = seg.onStroke(f_testLeg(5, 110, 130), se)
+    passed += f_assert(na(third) and na(fifth) and seg.pending.size() == 5, "user test 5 five strokes stay one unfinished segment")
+    if enableSignals
+        PivotEngine trend = f_pivotEngine(1)
+        array<Event> te = array.new<Event>()
+        trend.onLeg(f_testLeg(1, 120, 100), te)
+        trend.onLeg(f_testLeg(2, 100, 115), te)
+        trend.onLeg(f_testLeg(3, 115, 105), te)
+        trend.onLeg(f_testLeg(4, 105, 110), te)
+        trend.onLeg(f_testLeg(5, 110, 90, true, 100), te)
+        trend.onLeg(f_testLeg(6, 90, 100), te)
+        trend.onLeg(f_testLeg(7, 100, 80), te)
+        trend.onLeg(f_testLeg(8, 80, 95), te)
+        trend.onPreview(f_testLeg(9, 95, 70, false, 40), te)
+        passed += f_assert(f_hasSignal(te, 1, 1, Life.candidate), "trend B1 candidate requires two pivots and divergence")
+        trend.onLeg(f_testLeg(9, 95, 70, true, 40), te)
+        trend.onLeg(f_testLeg(10, 70, 95), te)
+        passed += f_assert(f_hasSignal(te, 1, 1, Life.confirmed), "B1 locks on reverse structure even when reentering center")
+        trend.onPreview(f_testLeg(11, 95, 75, false), te)
+        trend.onLeg(f_testLeg(11, 95, 75), te)
+        passed += f_assert(f_hasSignal(te, 2, 1, Life.confirmed), "B2 first pullback holds B1 low")
+        if videoSpecialB2
+            PivotEngine specialB2 = f_pivotEngine(1)
+            array<Event> specialEvents = array.new<Event>()
+            specialB2.onLeg(f_testLeg(1, 100, 115), specialEvents)
+            specialB2.onLeg(f_testLeg(2, 115, 95), specialEvents)
+            specialB2.onLeg(f_testLeg(3, 95, 110), specialEvents)
+            Signal anchor = Signal.new()
+            anchor.m := f_pointMeta(f_testLeg(4, 95, 90), 90, 1)
+            anchor.side := 1
+            anchor.signal_class := 1
+            anchor.pivot_id := specialB2.active.m.id
+            anchor.key_price := 90
+            specialB2.firstAnchor := anchor
+            specialB2.second_stage := 2
+            specialB2.rebound_id := 4
+            specialB2.active.state := PivotState.completed
+            specialB2.secondPoint(f_testLeg(5, 95, 90 * (1 - specialB2Tolerance / 2)), true, specialEvents)
+            passed += f_assert(f_hasSignal(specialEvents, 2, 1, Life.confirmed), "video special B2 may slightly cross B1 while remaining outside ZS")
+    PivotEngine touch = f_pivotEngine(2)
+    array<Event> touchEvents = array.new<Event>()
+    touch.onLeg(f_testLeg(1, 100, 115), touchEvents)
+    touch.onLeg(f_testLeg(2, 115, 95), touchEvents)
+    touch.onLeg(f_testLeg(3, 95, 110), touchEvents)
+    touch.onLeg(f_testLeg(4, 110, 102), touchEvents)
+    touch.onLeg(f_testLeg(5, 102, 130), touchEvents)
+    touch.onLeg(f_testLeg(6, 130, 110), touchEvents)
+    passed += f_assert(not f_hasSignal(touchEvents, 3, 1, Life.confirmed), "touch ZG is not B3")
+    passed += f_assert(not f_hasSignal(touchEvents, 2, 1, Life.confirmed), "no B2 without confirmed B1")
+    PivotEngine mirrored = f_pivotEngine(2)
+    array<Event> mirrorEvents = array.new<Event>()
+    mirrored.onLeg(f_testLeg(1, -100, -115), mirrorEvents)
+    mirrored.onLeg(f_testLeg(2, -115, -95), mirrorEvents)
+    mirrored.onLeg(f_testLeg(3, -95, -110), mirrorEvents)
+    mirrored.onLeg(f_testLeg(4, -110, -102), mirrorEvents)
+    mirrored.onLeg(f_testLeg(5, -102, -130), mirrorEvents)
+    mirrored.onPreview(f_testLeg(6, -130, -115, false), mirrorEvents)
+    mirrored.onLeg(f_testLeg(6, -130, -115), mirrorEvents)
+    passed += f_assert(mirrored.active.zd == -110 and mirrored.active.zg == -100, "H pivot mirror boundaries")
+    if enableSignals
+        passed += f_assert(f_hasSignal(mirrorEvents, 3, -1, Life.confirmed), "H3sell mirror of L3buy")
+    SegmentEngine noGap = f_segmentEngine()
+    array<Event> ngEvents = array.new<Event>()
+    array<float> ngPrices = array.from(100.0, 120.0, 110.0, 130.0, 115.0, 125.0, 105.0, 120.0, 100.0)
+    Leg ngResult = na
+    for i = 1 to 8
+        Leg made = noGap.onStroke(f_testLeg(i, ngPrices.get(i - 1), ngPrices.get(i)), ngEvents)
+        if not na(made)
+            ngResult := made
+    passed += f_assert(not na(ngResult) and ngResult.last_child == 3 and ngResult.end_price == 130, "no-gap feature sequence ends at BI3, confirms at BI8")
+    SegmentEngine withGap = f_segmentEngine()
+    array<Event> gapEvents = array.new<Event>()
+    array<float> gapPrices = array.from(100.0, 120.0, 110.0, 140.0, 125.0, 135.0, 115.0, 125.0, 105.0, 120.0, 110.0, 130.0, 115.0, 135.0)
+    Leg gapResult = na
+    for i = 1 to 12
+        Leg made = withGap.onStroke(f_testLeg(i, gapPrices.get(i - 1), gapPrices.get(i)), gapEvents)
+        if not na(made)
+            gapResult := made
+    passed += f_assert(na(gapResult), "gap waits beyond reverse three strokes")
+    gapResult := withGap.onStroke(f_testLeg(13, 115, 135), gapEvents)
+    passed += f_assert(gapConfirm ? not na(gapResult) and gapResult.end_price == 140 : na(gapResult), "gap requires secondary feature fractal or remains unconfirmed")
+    passed

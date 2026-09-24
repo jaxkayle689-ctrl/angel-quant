@@ -1,0 +1,82 @@
+// Phase 9 primitive: prefix sums + ring range-max trees. Interval (start,end].
+// A shared endpoint is never counted twice. Missing samples fail closed.
+type MomentumStore
+    array<int> ids
+    array<float> positive
+    array<float> negative
+    array<int> missing
+    array<float> dif_up
+    array<float> dif_down
+    array<float> hist_up
+    array<float> hist_down
+    int capacity = 0
+    int base = 0
+    float pos_total = 0.0
+    float neg_total = 0.0
+    int missing_total = 0
+
+f_momentumStore(int capacity) =>
+    int base = 1
+    while base < capacity
+        base *= 2
+    MomentumStore.new(array.new<int>(capacity, -1), array.new<float>(capacity, 0.0), array.new<float>(capacity, 0.0), array.new<int>(capacity, 0), array.new<float>(2 * base, 0.0), array.new<float>(2 * base, 0.0), array.new<float>(2 * base, 0.0), array.new<float>(2 * base, 0.0), capacity, base, 0.0, 0.0, 0)
+
+f_treeSet(array<float> tree, int base, int slot, float value) =>
+    int p = base + slot
+    tree.set(p, value)
+    p := int(p / 2)
+    while p >= 1
+        tree.set(p, math.max(tree.get(2 * p), tree.get(2 * p + 1)))
+        p := int(p / 2)
+    0
+
+f_treeRange(array<float> tree, int base, int fromSlot, int toSlot) =>
+    int left = base + fromSlot
+    int right = base + toSlot
+    float peak = 0.0
+    while left <= right
+        if left % 2 == 1
+            peak := math.max(peak, tree.get(left))
+            left += 1
+        if right % 2 == 0
+            peak := math.max(peak, tree.get(right))
+            right -= 1
+        left := int(left / 2)
+        right := int(right / 2)
+    peak
+
+f_ringPeak(array<float> tree, int base, int capacity, int first, int last) =>
+    first <= last ? f_treeRange(tree, base, first, last) : math.max(f_treeRange(tree, base, first, capacity - 1), f_treeRange(tree, base, 0, last))
+
+method sample(MomentumStore self, int ix, float dif, float histogram) =>
+    int slot = ix % self.capacity
+    self.pos_total += math.max(nz(histogram), 0.0)
+    self.neg_total += math.max(-nz(histogram), 0.0)
+    self.missing_total += na(dif) or na(histogram) ? 1 : 0
+    self.missing.set(slot, self.missing_total)
+    self.ids.set(slot, na(dif) or na(histogram) ? -1 : ix)
+    self.positive.set(slot, self.pos_total)
+    self.negative.set(slot, self.neg_total)
+    f_treeSet(self.dif_up, self.base, slot, math.max(nz(dif), 0.0))
+    f_treeSet(self.dif_down, self.base, slot, math.max(-nz(dif), 0.0))
+    f_treeSet(self.hist_up, self.base, slot, math.max(nz(histogram), 0.0))
+    f_treeSet(self.hist_down, self.base, slot, math.max(-nz(histogram), 0.0))
+    0
+
+method measure(MomentumStore self, Leg leg) =>
+    Momentum m = Momentum.new()
+    if not na(leg)
+        int si = leg.m.start_index
+        int ei = leg.m.end_index
+        int length = ei - si
+        int first = (si + 1) % self.capacity
+        int last = ei % self.capacity
+        int startSlot = si % self.capacity
+        m.bars := length
+        if length > 0 and length <= areaWindow and length < self.capacity and self.ids.get(startSlot) == si and self.ids.get(last) == ei and si >= macdSlow + macdSignal and self.missing.get(last) == self.missing.get(startSlot)
+            bool up = leg.m.direction == 1
+            m.area := up ? self.positive.get(last) - self.positive.get(startSlot) : self.negative.get(last) - self.negative.get(startSlot)
+            m.peak := f_ringPeak(up ? self.dif_up : self.dif_down, self.base, self.capacity, first, last)
+            m.hist_peak := f_ringPeak(up ? self.hist_up : self.hist_down, self.base, self.capacity, first, last)
+            m.complete := true
+    m

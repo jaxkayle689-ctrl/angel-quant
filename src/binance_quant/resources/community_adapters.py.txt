@@ -1,0 +1,42 @@
+"""Local Binance futures adapters. Original strategies remain in separate files."""
+import upstream_GeneticEngineV1 as genetic
+import pandas as pd
+from upstream_TrendFollowingStrategyV2 import TrendFollowingStrategyV2
+from upstream_EwoMomentumV1 import EwoMomentumV1
+
+
+def causal_normalize(series):
+    is_series = isinstance(series, pd.Series)
+    values = series if is_series else pd.Series(series)
+    low = values.rolling(200, min_periods=1).min()
+    width = values.rolling(200, min_periods=1).max() - low
+    result = ((values - low) / width.replace(0, float('nan'))).fillna(0)
+    return result if is_series else result.to_numpy()
+
+
+genetic.normalize = causal_normalize
+
+
+class PortfolioSizing:
+    can_short = False
+
+    def leverage(self, pair, current_time, current_rate, proposed_leverage, max_leverage, entry_tag, side, **kwargs):
+        project = self.config.get('bq_projects', {}).get(pair, {})
+        return min(float(project.get('leverage', 1)), max_leverage)
+
+    def custom_stake_amount(self, pair, current_time, current_rate, proposed_stake, min_stake, max_stake, leverage, entry_tag, side, **kwargs):
+        project = self.config.get('bq_projects', {}).get(pair, {})
+        stake = min(float(project.get('initial_stake', proposed_stake)), float(project.get('budget', max_stake)), max_stake)
+        return stake if min_stake is None or stake >= min_stake else 0
+
+
+class AngelGenetic(PortfolioSizing, genetic.GeneticEngineV1):
+    startup_candle_count = 400
+
+
+class AngelTrend(PortfolioSizing, TrendFollowingStrategyV2):
+    pass
+
+
+class AngelEwo(PortfolioSizing, EwoMomentumV1):
+    pass

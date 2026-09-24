@@ -1,0 +1,273 @@
+//@version=6
+indicator("Chan Theory Complete | Chanlun Structure Pro", overlay = true, max_lines_count = 10, max_boxes_count = 240, max_labels_count = 10)
+
+// PHASE 1 ONLY: inclusion processing. No fractals, strokes or trading signals.
+// Independently implemented. Confirmation requires a subsequent non-containing
+// CLOSED raw bar. The mutable tail never aliases the frozen history.
+enum Direction
+    unknown = "等待方向"
+    up = "上涨"
+    down = "下跌"
+
+type ChanBar
+    int seq
+    int bar_index
+    int timestamp
+    float high
+    float low
+    Direction direction
+    bool confirmed
+    int start_index
+    int end_index
+    int start_time
+    int end_time
+    int high_index
+    int low_index
+    int high_time
+    int low_time
+    int raw_count
+    int confirmed_at_index
+    int confirmed_at_time
+
+type InclusionEngine
+    array<ChanBar> history
+    ChanBar tail
+    Direction direction
+    int next_seq
+    int write_slot
+    int capacity
+    int total_frozen
+    int warmup_skipped
+    int last_raw_index
+
+type BoxPool
+    array<box> objects
+    int cursor
+    int capacity
+
+int maxHistory = input.int(2000, "最大历史长度 / 缓存容量", options = [500, 1000, 2000, 5000], group = "基础")
+string startMode = input.string("最近历史", "计算起点", options = ["最近历史", "固定时间"], group = "基础")
+int fixedStart = input.time(timestamp("01 Jan 2024 00:00 +0000"), "固定开始时间", group = "基础")
+bool debug = input.bool(false, "Debug", group = "基础")
+bool runTests = input.bool(false, "运行内置自检", group = "基础")
+bool enabled = input.bool(true, "处理包含关系", group = "K线")
+bool showBars = input.bool(true, "显示处理后 K 线范围", group = "K线")
+bool showTail = input.bool(true, "显示未确认范围", group = "K线")
+int visibleBars = input.int(120, "显示范围数量", minval = 10, maxval = 200, group = "外观")
+color upColor = input.color(color.teal, "上涨颜色", group = "外观")
+color downColor = input.color(color.red, "下跌颜色", group = "外观")
+int opacity = input.int(88, "范围透明度", minval = 0, maxval = 100, group = "外观")
+
+f_contains(float ah, float al, float bh, float bl) =>
+    (ah >= bh and al <= bl) or (bh >= ah and bl <= al)
+
+f_relation(float ah, float al, float bh, float bl) =>
+    bh > ah and bl > al ? Direction.up : bh < ah and bl < al ? Direction.down : Direction.unknown
+
+f_raw(int ix, int ts, int endTs, float hi, float lo) =>
+    ChanBar.new(-1, ix, ts, hi, lo, Direction.unknown, false, ix, ix, ts, endTs, ix, ix, ts, ts, 1, na, na)
+
+f_engine(int capacity) =>
+    InclusionEngine.new(array.new<ChanBar>(), na, Direction.unknown, 0, 0, capacity, 0, 0, na)
+
+// Equal extrema retain the first raw source, making source selection deterministic.
+method mergeTail(ChanBar self, ChanBar raw, Direction dir) =>
+    if self.confirmed or dir == Direction.unknown
+        runtime.error("mergeTail: frozen tail or unknown direction")
+    bool takeHigh = dir == Direction.up ? raw.high > self.high : raw.high < self.high
+    bool takeLow = dir == Direction.up ? raw.low > self.low : raw.low < self.low
+    if takeHigh
+        self.high := raw.high
+        self.high_index := raw.high_index
+        self.high_time := raw.high_time
+    if takeLow
+        self.low := raw.low
+        self.low_index := raw.low_index
+        self.low_time := raw.low_time
+    self.bar_index := raw.bar_index
+    self.timestamp := raw.timestamp
+    self.end_index := raw.end_index
+    self.end_time := raw.end_time
+    self.raw_count += raw.raw_count
+    self.direction := dir
+    self
+
+method remember(InclusionEngine self, ChanBar frozen) =>
+    if self.history.size() < self.capacity
+        self.history.push(frozen)
+    else
+        self.history.set(self.write_slot, frozen)
+        self.write_slot := (self.write_slot + 1) % self.capacity
+    self.total_frozen += 1
+    frozen
+
+// Returns one frozen event or na. Called only once for each closed raw bar.
+method ingest(InclusionEngine self, ChanBar raw, bool removeInclusion) =>
+    if na(raw.high) or na(raw.low) or raw.high < raw.low
+        runtime.error("ingest: invalid raw range")
+    if not na(self.last_raw_index) and raw.bar_index <= self.last_raw_index
+        runtime.error("ingest: raw index must increase")
+    self.last_raw_index := raw.bar_index
+    ChanBar event = na
+    if na(self.tail)
+        self.tail := raw.copy()
+        self.tail.seq := self.next_seq
+        self.next_seq += 1
+    else
+        ChanBar tail = self.tail
+        bool included = f_contains(tail.high, tail.low, raw.high, raw.low)
+        if removeInclusion and included and self.direction == Direction.unknown
+            // Explicit warmup exclusion: no candle-color or future-direction guess.
+            self.warmup_skipped += tail.raw_count
+            int seedSeq = tail.seq
+            self.tail := raw.copy()
+            self.tail.seq := seedSeq
+        else if removeInclusion and included
+            tail.mergeTail(raw, self.direction)
+        else
+            Direction nextDir = f_relation(tail.high, tail.low, raw.high, raw.low)
+            if nextDir == Direction.unknown
+                nextDir := self.direction
+            event := tail.copy()
+            event.confirmed := true
+            if event.direction == Direction.unknown
+                event.direction := nextDir
+            event.confirmed_at_index := raw.bar_index
+            event.confirmed_at_time := raw.end_time
+            self.remember(event)
+            self.direction := nextDir
+            self.tail := raw.copy()
+            self.tail.seq := self.next_seq
+            self.tail.direction := nextDir
+            self.next_seq += 1
+    event
+
+f_color(Direction dir) =>
+    dir == Direction.up ? upColor : dir == Direction.down ? downColor : color.gray
+
+f_description(ChanBar value) =>
+    "CB" + str.tostring(value.seq) + " raw " + str.tostring(value.start_index) + ".." + str.tostring(value.end_index) + "\nH=" + str.tostring(value.high, format.mintick) + " @" + str.tostring(value.high_index) + " L=" + str.tostring(value.low, format.mintick) + " @" + str.tostring(value.low_index) + "\n" + (value.confirmed ? "locked @" + str.tostring(value.confirmed_at_index) : "candidate")
+
+f_paint(box id, ChanBar value, bool candidate) =>
+    color base = f_color(value.direction)
+    box.set_lefttop(id, value.start_time, value.high)
+    box.set_rightbottom(id, value.end_time, value.low)
+    box.set_border_color(id, color.new(base, candidate ? 55 : 15))
+    box.set_border_style(id, candidate ? line.style_dashed : line.style_solid)
+    box.set_bgcolor(id, color.new(base, candidate ? 95 : opacity))
+    box.set_text(id, debug ? f_description(value) : "")
+    box.set_text_color(id, base)
+    box.set_text_size(id, size.tiny)
+    id
+
+method drawFrozen(BoxPool self, ChanBar value) =>
+    box id = na
+    if self.objects.size() < self.capacity
+        id := box.new(left = value.start_time, top = value.high, right = value.end_time, bottom = value.low, xloc = xloc.bar_time)
+        self.objects.push(id)
+    else
+        id := self.objects.get(self.cursor)
+        self.cursor := (self.cursor + 1) % self.capacity
+    f_paint(id, value, false)
+
+f_expect(bool condition, string name) =>
+    if not condition
+        runtime.error("Phase 1 self-test FAILED: " + name)
+    1
+
+f_feed(InclusionEngine engine, int ix, float hi, float lo, bool removeInclusion = true) =>
+    engine.ingest(f_raw(ix, ix * 60000, (ix + 1) * 60000, hi, lo), removeInclusion)
+
+// The harness exercises the production engine, not a second Pine implementation.
+f_selfTest() =>
+    int passed = 0
+    InclusionEngine rising = f_engine(10)
+    f_feed(rising, 0, 10, 5)
+    ChanBar first = f_feed(rising, 1, 12, 7)
+    f_feed(rising, 2, 11, 8)
+    f_feed(rising, 3, 13, 6)
+    passed += f_expect(rising.tail.high == 13 and rising.tail.low == 8, "rising recursive inclusion")
+    passed += f_expect(rising.tail.high_index == 3 and rising.tail.low_index == 2 and rising.tail.raw_count == 3, "independent extrema mapping")
+    ChanBar frozen = f_feed(rising, 4, 14, 9)
+    passed += f_expect(not na(frozen) and frozen.confirmed and frozen.start_index == 1 and frozen.end_index == 3 and frozen.confirmed_at_index == 4, "delayed lock")
+    f_feed(rising, 5, 14, 9)
+    passed += f_expect(rising.tail.high_index == 4 and rising.tail.low_index == 4, "equal extrema retain first source")
+    passed += f_expect(first.high == 10 and first.low == 5 and frozen.high == 13 and frozen.low == 8, "frozen snapshots unchanged")
+    f_feed(rising, 6, 12, 6)
+    f_feed(rising, 7, 13, 5)
+    passed += f_expect(rising.direction == Direction.down and rising.tail.high == 12 and rising.tail.low == 5, "reversal then downward inclusion")
+
+    InclusionEngine falling = f_engine(10)
+    f_feed(falling, 0, 15, 10)
+    f_feed(falling, 1, 13, 8)
+    f_feed(falling, 2, 12, 9)
+    f_feed(falling, 3, 14, 7)
+    passed += f_expect(falling.tail.high == 12 and falling.tail.low == 7, "falling recursive inclusion")
+    passed += f_expect(falling.tail.high_index == 2 and falling.tail.low_index == 3, "falling extrema mapping")
+
+    InclusionEngine warmup = f_engine(10)
+    f_feed(warmup, 0, 10, 0)
+    f_feed(warmup, 1, 9, 1)
+    passed += f_expect(warmup.total_frozen == 0 and warmup.direction == Direction.unknown and warmup.warmup_skipped == 1, "ambiguous startup excluded")
+    ChanBar seed = f_feed(warmup, 2, 11, 2)
+    passed += f_expect(seed.start_index == 1 and seed.high == 9 and warmup.direction == Direction.up, "startup first non-inclusion pair")
+
+    InclusionEngine bypass = f_engine(10)
+    f_feed(bypass, 0, 10, 0, false)
+    f_feed(bypass, 1, 9, 1, false)
+    f_feed(bypass, 2, 8, 2, false)
+    passed += f_expect(bypass.total_frozen == 2 and bypass.warmup_skipped == 0 and bypass.tail.raw_count == 1, "disabled one-to-one")
+
+    InclusionEngine ring = f_engine(3)
+    for i = 0 to 9
+        f_feed(ring, i, 10.0 + i, 5.0 + i)
+    passed += f_expect(ring.history.size() == 3 and ring.total_frozen == 9 and ring.tail.seq == 9, "bounded ring stable IDs")
+    passed += f_expect(f_contains(10, 5, 10, 6) and f_contains(10, 5, 10, 5) and not f_contains(10, 5, 11, 6), "inclusive equality predicate")
+    passed
+
+var InclusionEngine engine = f_engine(maxHistory)
+var BoxPool drawingPool = BoxPool.new(array.new<box>(), 0, visibleBars)
+var box tailBox = na
+var table dashboard = table.new(position.top_right, 2, 9, border_width = 1)
+var int startIndex = math.max(0, last_bar_index - maxHistory + 1)
+var int testCount = 0
+if barstate.isfirst and runTests
+    testCount := f_selfTest()
+
+bool inRange = startMode == "固定时间" ? time >= fixedStart : bar_index >= startIndex
+ChanBar newFrozen = na
+if barstate.isconfirmed and inRange
+    // time_close can be na on some non-time charts; no future timestamp is guessed.
+    int endTs = na(time_close) ? time : time_close
+    newFrozen := engine.ingest(f_raw(bar_index, time, endTs, high, low), enabled)
+    if not na(newFrozen) and showBars
+        drawingPool.drawFrozen(newFrozen)
+
+if barstate.islast
+    if showBars and showTail and not na(engine.tail)
+        if na(tailBox)
+            tailBox := box.new(left = engine.tail.start_time, top = engine.tail.high, right = engine.tail.end_time, bottom = engine.tail.low, xloc = xloc.bar_time)
+        f_paint(tailBox, engine.tail, true)
+    else if not na(tailBox)
+        box.delete(tailBox)
+        tailBox := na
+    table.cell(dashboard, 0, 0, "CHAN THEORY", text_color = color.white, bgcolor = color.navy)
+    table.cell(dashboard, 1, 0, "Phase 1 · 包含处理", text_color = color.white, bgcolor = color.navy)
+    table.cell(dashboard, 0, 1, "图表周期")
+    table.cell(dashboard, 1, 1, timeframe.period)
+    table.cell(dashboard, 0, 2, "合并方向")
+    table.cell(dashboard, 1, 2, str.tostring(engine.direction))
+    table.cell(dashboard, 0, 3, "冻结 / 缓存")
+    table.cell(dashboard, 1, 3, str.tostring(engine.total_frozen) + " / " + str.tostring(engine.history.size()))
+    table.cell(dashboard, 0, 4, "启动跳过原始 K")
+    table.cell(dashboard, 1, 4, str.tostring(engine.warmup_skipped))
+    table.cell(dashboard, 0, 5, "当前尾部")
+    table.cell(dashboard, 1, 5, na(engine.tail) ? "N/A" : "CB" + str.tostring(engine.tail.seq) + " · Candidate")
+    table.cell(dashboard, 0, 6, "内置断言")
+    table.cell(dashboard, 1, 6, runTests ? str.tostring(testCount) + " PASS" : "未运行")
+    table.cell(dashboard, 0, 7, "确认规则")
+    table.cell(dashboard, 1, 7, "后继非包含 K 收盘；盘中不提交")
+    table.cell(dashboard, 0, 8, "范围")
+    table.cell(dashboard, 1, 8, debug and not na(engine.tail) ? f_description(engine.tail) : "本阶段无分型 / 笔 / 信号")
+
+alertcondition(not na(newFrozen), "ChanBar confirmed", "Phase 1: a processed ChanBar was frozen on this closed bar.")

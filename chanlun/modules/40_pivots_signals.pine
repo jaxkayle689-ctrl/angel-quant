@@ -1,0 +1,598 @@
+// PHASES 6–12: shared incremental engines for frozen strokes and segments.
+enum PivotState
+    forming = "形成中"
+    confirmed = "已成立"
+    extending = "延伸"
+    leavingUp = "向上离开"
+    leavingDown = "向下离开"
+    retestingUp = "向上离开后回踩"
+    retestingDown = "向下离开后反抽"
+    completed = "已完成"
+
+type ZhongShu
+    Meta m
+    float zd = na
+    float zg = na
+    float gg = na
+    float dd = na
+    PivotState state = PivotState.forming
+    int level = 0
+    int seed1 = 0
+    int seed2 = 0
+    int seed3 = 0
+    int last_member_id = 0
+    int departure_id = 0
+    int retest_id = 0
+    Leg departure = na
+    Leg up_ref = na
+    Leg down_ref = na
+    int completed_at_index = na
+    int completed_at_time = na
+    string reason = ""
+
+type Signal
+    Meta m
+    int level = 0
+    int side = 0
+    int signal_class = 0
+    Life state = Life.candidate
+    string reason = ""
+    int pivot_id = 0
+    int divergence_id = 0
+    int prior_signal_id = 0
+    float key_price = na
+    int retest_id = 0
+    int source_leg_id = 0
+    bool source_frozen = false
+    int invalidated_at_index = na
+
+type Divergence
+    Meta m
+    int level = 0
+    int side = 0
+    Life state = Life.candidate
+    string reason = ""
+    string kind = ""
+    int reference_leg_id = 0
+    int current_leg_id = 0
+    int previous_pivot_id = 0
+    int pivot_id = 0
+    float reference_price = na
+    float current_price = na
+    float area_ratio = na
+    float peak_ratio = na
+    float hist_ratio = na
+    bool source_frozen = false
+    int invalidated_at_index = na
+
+type Move
+    Meta m
+    int level = 0
+    int direction = 0
+    int first_pivot_id = 0
+    int last_pivot_id = 0
+    int pivot_count = 0
+    string kind = ""
+    string reason = ""
+
+type PivotEngine
+    int level = 0
+    ZhongShu active = na
+    ZhongShu previous = na
+    int trend = 0
+    string reason = "等待三条连续确认结构的共同交集"
+    array<ZhongShu> history
+    array<Signal> signals
+    array<Divergence> divergences
+    array<Move> moves
+    array<Leg> seeds
+    ZhongShu previewPivot = na
+    Signal pending1 = na
+    Signal pending2 = na
+    Signal pending3 = na
+    Divergence pendingDiv = na
+    Signal firstAnchor = na
+    int second_stage = 0
+    int rebound_id = 0
+    int next_pivot_id = 1
+    int next_signal_id = 1
+    int next_div_id = 1
+    int next_move_id = 1
+    int last_leg_id = 0
+    Leg last_leg = na
+    bool halted = false
+    string reason1 = "No B1/S1: 等待两个同级中枢和趋势背驰"
+    string reason2 = "No B2/S2: no previous B1/S1"
+    string reason3 = "No B3/S3: 等待中枢、离开及首次反向回抽"
+    string moveType = "待定"
+
+f_pivotEngine(int level) =>
+    PivotEngine e = PivotEngine.new()
+    e.level := level
+    e.history := array.new<ZhongShu>()
+    e.signals := array.new<Signal>()
+    e.divergences := array.new<Divergence>()
+    e.moves := array.new<Move>()
+    e.seeds := array.new<Leg>()
+    e
+
+f_zsCopy(ZhongShu p) =>
+    ZhongShu q = na
+    if not na(p)
+        q := p.copy()
+        q.m := p.m.copy()
+        q.departure := f_legCopy(p.departure)
+        q.up_ref := f_legCopy(p.up_ref)
+        q.down_ref := f_legCopy(p.down_ref)
+    q
+
+f_pointMeta(Leg leg, int id, int side) =>
+    Meta m = f_meta(id, leg.m.end_index, leg.m.end_time, leg.m.end_index, leg.m.end_time, leg.end_price, leg.end_price, false)
+    m.direction := side
+    m
+
+// Remove terminal evidence only; live candidates and the B2 anchor survive pruning.
+method trimEvidence(PivotEngine self) =>
+    while self.signals.size() > 120
+        int removeAt = na
+        for i = 0 to self.signals.size() - 1
+            Signal s = self.signals.get(i)
+            bool anchor = not na(self.firstAnchor) and s.m.id == self.firstAnchor.m.id
+            if s.state != Life.candidate and not anchor
+                removeAt := i
+                break
+        if na(removeAt)
+            break
+        self.signals.remove(removeAt)
+    while self.divergences.size() > 120
+        int removeAt = na
+        for i = 0 to self.divergences.size() - 1
+            if self.divergences.get(i).state != Life.candidate
+                removeAt := i
+                break
+        if na(removeAt)
+            break
+        self.divergences.remove(removeAt)
+    while self.history.size() > 80
+        self.history.shift()
+    while self.moves.size() > 80
+        self.moves.shift()
+    0
+
+f_signalEvent(Signal s, array<Event> events) =>
+    f_emit(events, "signal", s.level, s.side, s.signal_class, s.state, s.m.id, s.m.bar_index, s.m.timestamp, s.m.low, s.reason)
+
+f_divEvent(Divergence d, array<Event> events) =>
+    f_emit(events, "divergence", d.level, d.side, 0, d.state, d.m.id, d.m.bar_index, d.m.timestamp, d.current_price, d.reason)
+
+// Confirmed is terminal. Only mutable candidates may transition or move anchor.
+f_signalFinish(Signal s, Life state, string reason, array<Event> events) =>
+    if not na(s) and s.state == Life.candidate
+        s.state := state
+        s.reason := reason
+        s.m.confirmed := state == Life.confirmed
+        if state == Life.confirmed
+            s.m.confirmed_at_index := bar_index
+            s.m.confirmed_at_time := na(time_close) ? time : time_close
+        else if state == Life.invalidated
+            s.invalidated_at_index := bar_index
+        f_signalEvent(s, events)
+    0
+
+f_divFinish(Divergence d, Life state, string reason, array<Event> events) =>
+    if not na(d) and d.state == Life.candidate
+        d.state := state
+        d.reason := reason
+        d.m.confirmed := state == Life.confirmed
+        if state == Life.confirmed
+            d.m.confirmed_at_index := bar_index
+            d.m.confirmed_at_time := na(time_close) ? time : time_close
+        else if state == Life.invalidated
+            d.invalidated_at_index := bar_index
+        f_divEvent(d, events)
+    0
+
+method newSignal(PivotEngine self, Leg leg, int side, int cls, int pivotId, int divId, int priorId, float key, string reason, array<Event> events) =>
+    Signal s = Signal.new()
+    s.m := f_pointMeta(leg, self.next_signal_id, side)
+    self.next_signal_id += 1
+    s.level := self.level
+    s.side := side
+    s.signal_class := cls
+    s.pivot_id := pivotId
+    s.divergence_id := divId
+    s.prior_signal_id := priorId
+    s.key_price := key
+    s.retest_id := cls == 1 ? 0 : leg.m.id
+    s.source_leg_id := leg.m.id
+    s.source_frozen := leg.m.confirmed
+    s.reason := reason
+    self.signals.push(s)
+    f_signalEvent(s, events)
+    s
+
+f_signalUpdate(Signal s, Leg leg, string reason, array<Event> events) =>
+    if not na(s) and s.state == Life.candidate
+        bool changed = s.m.end_index != leg.m.end_index or s.m.low != leg.end_price or s.reason != reason
+        s.m := f_pointMeta(leg, s.m.id, s.side)
+        s.source_leg_id := leg.m.id
+        s.retest_id := s.signal_class == 1 ? 0 : leg.m.id
+        s.source_frozen := leg.m.confirmed
+        s.reason := reason
+        if changed
+            f_signalEvent(s, events)
+    0
+
+f_pivotRelation(ZhongShu previous, ZhongShu current) =>
+    int direction = 0
+    if not na(previous) and not na(current)
+        direction := current.zd > previous.zg ? 1 : current.zg < previous.zd ? -1 : 0
+    direction
+
+// Directional magnitudes over complete endpoint ranges. Composite mode requires
+// area AND DIF decay, with no increase in histogram peak. Equal force is not DIV.
+f_momentumDecay(Leg a, Leg b) =>
+    bool complete = not na(a) and not na(b) and not na(a.mom) and not na(b.mom)
+    if complete
+        complete := a.mom.complete and b.mom.complete and a.mom.bars > 0 and b.mom.bars > 0
+    float ar = na
+    float pr = na
+    float hr = na
+    bool decayed = false
+    string why = "MACD结构统计不足 / insufficientHistory"
+    if complete
+        ar := a.mom.area > 0 ? b.mom.area / a.mom.area : na
+        pr := a.mom.peak > 0 ? b.mom.peak / a.mom.peak : na
+        hr := a.mom.hist_peak > 0 ? b.mom.hist_peak / a.mom.hist_peak : na
+        bool areaOk = not na(ar) and ar < 1.0 and ar <= divRatio
+        bool peakOk = not na(pr) and pr < 1.0 and pr <= divRatio
+        bool histOk = not na(hr) and hr <= 1.0
+        decayed := divAlgorithm == "MACD柱面积" ? areaOk : divAlgorithm == "DIF峰值" ? peakOk : areaOk and peakOk and histOk
+        why := "area=" + str.tostring(ar, "#.###") + " DIF=" + str.tostring(pr, "#.###") + " hist=" + str.tostring(hr, "#.###") + " threshold=" + str.tostring(divRatio, "#.##") + (decayed ? " 力度衰减" : " 无有效力度衰减")
+    [decayed, ar, pr, hr, why]
+
+method cancelDivergence(PivotEngine self, string why, array<Event> events) =>
+    f_divFinish(self.pendingDiv, Life.invalidated, why, events)
+    f_signalFinish(self.pending1, Life.invalidated, why, events)
+    self.pendingDiv := na
+    self.pending1 := na
+    self.reason1 := "No B1/S1: " + why
+    0
+
+// Consume the first B2 pullback once; failure cannot be replaced by a later low.
+method secondPoint(PivotEngine self, Leg leg, bool frozen, array<Event> events) =>
+    if self.second_stage == 2 and not na(self.firstAnchor)
+        Signal anchor = self.firstAnchor
+        if leg.m.direction == -anchor.side and leg.m.id > self.rebound_id
+            bool standard = anchor.side == 1 ? leg.m.low >= anchor.key_price : leg.m.high <= anchor.key_price
+            float keyScale = math.max(math.abs(anchor.key_price), syminfo.mintick)
+            float excursion = anchor.side == 1 ? (anchor.key_price - leg.m.low) / keyScale : (leg.m.high - anchor.key_price) / keyScale
+            ZhongShu p = self.active
+            bool samePivot = not na(p) and p.m.id == anchor.pivot_id
+            bool remainsOutside = samePivot and (anchor.side == 1 ? leg.m.high < p.zd : leg.m.low > p.zg)
+            bool special = videoSpecialB2 and not standard and excursion > 0 and excursion <= specialB2Tolerance and remainsOutside
+            bool holds = standard or special
+            string mode = special ? "special B2/S2" : "standard B2/S2"
+            string why = mode + " first retest=" + f_num(leg.end_price) + "; B1/S1 key=" + f_num(anchor.key_price) + "; excursion=" + str.tostring(excursion * 100, "#.###") + "%; prior1=" + str.tostring(anchor.m.id) + "; rebound=" + str.tostring(self.rebound_id) + (special ? "; remains outside ZS" + str.tostring(p.m.id) : "")
+            if holds
+                if na(self.pending2)
+                    self.pending2 := self.newSignal(leg, anchor.side, 2, anchor.pivot_id, anchor.divergence_id, anchor.m.id, anchor.key_price, why + "; 等待首次回抽冻结", events)
+                else
+                    f_signalUpdate(self.pending2, leg, why + "; 等待首次回抽冻结", events)
+                if frozen
+                    f_signalFinish(self.pending2, Life.confirmed, why + "; 首次回抽结构已确认", events)
+                    self.pending2 := na
+                    self.second_stage := 0
+                    self.firstAnchor := na
+                self.reason2 := why + (frozen ? "; confirmed=true" : "; candidate")
+            else
+                string fail = "首次回抽破坏一类点关键价 " + f_num(anchor.key_price)
+                f_signalFinish(self.pending2, Life.invalidated, fail, events)
+                self.pending2 := na
+                self.reason2 := "No B2/S2: " + fail
+                if frozen
+                    self.second_stage := 0
+                    self.firstAnchor := na
+    0
+
+method thirdPoint(PivotEngine self, Leg leg, bool frozen, array<Event> events) =>
+    ZhongShu p = self.active
+    if not na(p) and not na(p.departure) and p.state != PivotState.completed
+        int side = p.departure.m.direction
+        if leg.m.direction == -side and leg.m.id > p.departure.m.id
+            bool holds = side == 1 ? leg.m.low > p.zg : leg.m.high < p.zd
+            float bound = side == 1 ? p.zg : p.zd
+            string why = "B3/S3 ZS" + str.tostring(p.m.id) + " departure=" + str.tostring(p.departure_id) + " first retest=" + str.tostring(leg.m.id) + "; " + f_num(side == 1 ? leg.m.low : leg.m.high) + (side == 1 ? " > ZG=" : " < ZD=") + f_num(bound)
+            if holds
+                if na(self.pending3)
+                    self.pending3 := self.newSignal(leg, side, 3, p.m.id, 0, 0, bound, why + "; 等待回抽冻结", events)
+                else
+                    f_signalUpdate(self.pending3, leg, why + "; 等待回抽冻结", events)
+                if frozen
+                    f_signalFinish(self.pending3, Life.confirmed, why + "; confirmed=true", events)
+                    self.pending3 := na
+                self.reason3 := why + (frozen ? "; confirmed=true" : "; candidate")
+            else
+                f_signalFinish(self.pending3, Life.invalidated, "首次回抽进入或接触中枢；ZG=" + f_num(p.zg) + " ZD=" + f_num(p.zd), events)
+                self.pending3 := na
+                self.reason3 := "No B3/S3: retest entered/touched pivot; " + f_num(side == 1 ? leg.m.low : leg.m.high)
+    0
+
+// B1 requires two established centers and a completed exit comparison, followed
+// by a frozen reversal. Reentering the center does not invalidate that reversal.
+// Consolidation DIV is separate and cannot promote itself into a first-class point.
+method finishDivergence(PivotEngine self, Leg reversal, array<Event> events) =>
+    Divergence d = self.pendingDiv
+    if not na(d) and d.source_frozen and reversal.m.id > d.current_leg_id and reversal.m.direction == d.side
+        f_divFinish(d, Life.confirmed, d.reason + "; 反向确认结构=" + str.tostring(reversal.m.id), events)
+        if d.kind == "趋势背驰" and not na(self.pending1)
+            Signal first = self.pending1
+            f_signalFinish(first, Life.confirmed, first.reason + "; 两同级中枢成立且反向结构=" + str.tostring(reversal.m.id), events)
+            f_signalFinish(self.pending2, Life.invalidated, "新确认一类点重置首次回抽追踪", events)
+            self.pending2 := na
+            self.firstAnchor := first
+            self.rebound_id := reversal.m.id
+            self.second_stage := 2
+            self.reason1 := first.reason
+            self.reason2 := "等待一类点后首次回抽；反弹结构=" + str.tostring(reversal.m.id)
+        self.pendingDiv := na
+        self.pending1 := na
+    0
+
+method examineDivergence(PivotEngine self, Leg leg, array<Event> events) =>
+    ZhongShu p = self.active
+    if not na(p) and p.state != PivotState.completed
+        int direction = leg.m.direction
+        bool leaving = direction == 1 ? leg.end_price > p.zg : leg.end_price < p.zd
+        int relative = f_pivotRelation(self.previous, p)
+        bool trendCase = relative == direction and not na(self.previous) and not na(self.previous.departure) and self.previous.departure.m.direction == direction
+        Leg reference = trendCase ? self.previous.departure : direction == 1 ? p.up_ref : p.down_ref
+        bool newExtreme = not na(reference) and (direction == 1 ? leg.end_price > reference.end_price : leg.end_price < reference.end_price)
+        bool comparable = leaving and not na(reference) and reference.m.id < leg.m.id and reference.m.direction == direction
+        [weak, ar, pr, hr, strengthReason] = f_momentumDecay(reference, leg)
+        bool eligible = comparable and newExtreme and weak
+        string kind = trendCase ? "趋势背驰" : "盘整背驰"
+        string why = kind + " ZS" + str.tostring(p.m.id) + "; legs " + (na(reference) ? "?" : str.tostring(reference.m.id)) + "→" + str.tostring(leg.m.id) + "; " + (na(reference) ? "" : f_num(reference.end_price) + "→") + f_num(leg.end_price) + "; " + strengthReason
+        // Preserve a frozen exit while its opposite preview is still forming.
+        bool mayReplace = na(self.pendingDiv) or not self.pendingDiv.source_frozen or self.pendingDiv.current_leg_id == leg.m.id
+        if mayReplace
+            if eligible
+                if not na(self.pendingDiv) and (self.pendingDiv.current_leg_id != leg.m.id or self.pendingDiv.kind != kind)
+                    self.cancelDivergence("候选离开结构或背驰类型改变", events)
+                if na(self.pendingDiv)
+                    Divergence d = Divergence.new()
+                    d.m := f_pointMeta(leg, self.next_div_id, -direction)
+                    self.next_div_id += 1
+                    d.level := self.level
+                    d.side := -direction
+                    d.kind := kind
+                    d.reference_leg_id := reference.m.id
+                    d.current_leg_id := leg.m.id
+                    d.previous_pivot_id := trendCase ? self.previous.m.id : 0
+                    d.pivot_id := p.m.id
+                    d.reference_price := reference.end_price
+                    d.current_price := leg.end_price
+                    d.area_ratio := ar
+                    d.peak_ratio := pr
+                    d.hist_ratio := hr
+                    d.source_frozen := leg.m.confirmed
+                    d.reason := why
+                    self.divergences.push(d)
+                    self.pendingDiv := d
+                    f_divEvent(d, events)
+                    if trendCase
+                        self.pending1 := self.newSignal(leg, -direction, 1, p.m.id, d.m.id, 0, leg.end_price, why + "; 等待反向确认结构", events)
+                else
+                    Divergence d = self.pendingDiv
+                    bool changed = d.current_price != leg.end_price or d.m.end_index != leg.m.end_index or d.reason != why
+                    d.m := f_pointMeta(leg, d.m.id, d.side)
+                    d.current_price := leg.end_price
+                    d.area_ratio := ar
+                    d.peak_ratio := pr
+                    d.hist_ratio := hr
+                    d.source_frozen := leg.m.confirmed
+                    d.reason := why
+                    if changed
+                        f_divEvent(d, events)
+                    if not na(self.pending1)
+                        f_signalUpdate(self.pending1, leg, why + "; 等待反向确认结构", events)
+                        self.pending1.key_price := leg.end_price
+                self.reason1 := trendCase ? why + "; 一类点候选，等待反向冻结" : "No B1/S1: 仅盘整背驰，缺少两同级分离中枢趋势证据"
+            else
+                if not na(self.pendingDiv) and self.pendingDiv.current_leg_id == leg.m.id
+                    self.cancelDivergence("候选未继续满足价格新极值或力度衰减", events)
+                self.reason1 := not leaving ? "No B1/S1: 尚未沿趋势离开中枢" : not trendCase ? "No B1/S1: 不足两个同级分离中枢和可比较离开结构" : not newExtreme ? "No B1/S1: 价格未创新高/低" : "No B1/S1: " + strengthReason
+    0
+
+method seedPivot(PivotEngine self, array<Event> events) =>
+    if self.seeds.size() == 3
+        Leg a = self.seeds.get(0)
+        Leg b = self.seeds.get(1)
+        Leg c = self.seeds.get(2)
+        [zd, zg] = f_overlap3(a, b, c)
+        if zg > zd
+            ZhongShu p = ZhongShu.new()
+            p.m := f_meta(self.next_pivot_id, a.m.start_index, a.m.start_time, c.m.end_index, c.m.end_time, zd, zg, true)
+            self.next_pivot_id += 1
+            p.level := self.level
+            p.zd := zd
+            p.zg := zg
+            p.gg := math.max(a.m.high, math.max(b.m.high, c.m.high))
+            p.dd := math.min(a.m.low, math.min(b.m.low, c.m.low))
+            p.m.high := p.gg
+            p.m.low := p.dd
+            p.m.direction := 0
+            p.seed1 := a.m.id
+            p.seed2 := b.m.id
+            p.seed3 := c.m.id
+            p.last_member_id := c.m.id
+            p.state := PivotState.confirmed
+            p.reason := "seed=" + str.tostring(p.seed1) + "," + str.tostring(p.seed2) + "," + str.tostring(p.seed3) + "; ZD=max(low)=" + f_num(zd) + "; ZG=min(high)=" + f_num(zg)
+            for i = 0 to 2
+                Leg x = self.seeds.get(i)
+                if x.m.direction == 1
+                    p.up_ref := f_legCopy(x)
+                else
+                    p.down_ref := f_legCopy(x)
+            self.active := p
+            int provisional = f_pivotRelation(self.previous, p)
+            self.trend := provisional
+            self.moveType := provisional == 1 ? "上涨趋势进行中" : provisional == -1 ? "下跌趋势进行中" : "盘整进行中"
+            self.reason := p.reason
+            self.reason3 := "No B3/S3: 中枢已成立，等待离开和首次反向回抽"
+            f_emit(events, "pivot", self.level, 0, 0, Life.confirmed, p.m.id, p.m.end_index, p.m.end_time, (zg + zd) / 2.0, p.reason)
+        else
+            self.reason := "No pivot: 三结构交集为空或仅接触；ZD=" + f_num(zd) + " ZG=" + f_num(zg)
+    0
+
+method completePivot(PivotEngine self, Leg retest, array<Event> events) =>
+    ZhongShu p = self.active
+    p.state := PivotState.completed
+    p.retest_id := retest.m.id
+    p.completed_at_index := bar_index
+    p.completed_at_time := na(time_close) ? time : time_close
+    p.reason += "; completed by first outside retest=" + str.tostring(retest.m.id)
+    ZhongShu snapshot = f_zsCopy(p)
+    int direction = f_pivotRelation(self.previous, snapshot)
+    self.trend := direction
+    self.moveType := direction == 1 ? "上涨趋势" : direction == -1 ? "下跌趋势" : na(self.previous) ? "盘整（单中枢完成）" : "中枢重叠 / 走势边界待定"
+    Move move = Move.new()
+    move.m := snapshot.m.copy()
+    move.m.id := self.next_move_id
+    self.next_move_id += 1
+    move.m.direction := direction
+    move.m.confirmed_at_index := bar_index
+    move.m.confirmed_at_time := na(time_close) ? time : time_close
+    move.level := self.level
+    move.direction := direction
+    move.first_pivot_id := direction != 0 ? self.previous.m.id : snapshot.m.id
+    move.last_pivot_id := snapshot.m.id
+    move.pivot_count := direction != 0 ? 2 : 1
+    move.kind := self.moveType
+    move.reason := direction != 0 ? "两个完成同级中枢严格分离：" + str.tostring(self.previous.m.id) + "→" + str.tostring(snapshot.m.id) : na(self.previous) ? "首个中枢在首次不回枢回抽确认处完成" : "相邻完成中枢重叠；不推断为完成盘整或趋势"
+    if direction != 0
+        move.m.start_index := self.previous.m.start_index
+        move.m.start_time := self.previous.m.start_time
+        move.m.high := math.max(self.previous.gg, snapshot.gg)
+        move.m.low := math.min(self.previous.dd, snapshot.dd)
+    // Multiple overlapping centers are not a proven one-center consolidation.
+    if direction != 0 or na(self.previous)
+        self.moves.push(move)
+    self.history.push(snapshot)
+    self.previous := snapshot
+    // Old center members cannot seed repeated every-three-leg copies.
+    self.seeds.clear()
+    self.seeds.push(f_legCopy(p.departure))
+    self.seeds.push(f_legCopy(retest))
+    self.reason := p.reason
+    f_emit(events, "pivot", self.level, p.departure.m.direction, 0, Life.confirmed, p.m.id, p.m.end_index, p.m.end_time, (p.zg + p.zd) / 2.0, p.reason)
+    0
+
+method onLeg(PivotEngine self, Leg frozen, array<Event> events) =>
+    int result = 0
+    if not self.halted and not na(frozen) and frozen.m.id > self.last_leg_id
+        bool valid = frozen.m.confirmed and frozen.m.direction != 0 and not na(frozen.start_price) and not na(frozen.end_price)
+        if valid and not na(self.last_leg)
+            valid := frozen.m.start_index == self.last_leg.m.end_index and frozen.start_price == self.last_leg.end_price and frozen.m.direction == -self.last_leg.m.direction and frozen.m.end_index > self.last_leg.m.end_index
+        if not valid
+            self.halted := true
+            self.reason := "该级暂停：输入不是连续、交替、端点递增的冻结结构"
+            self.cancelDivergence(self.reason, events)
+            f_signalFinish(self.pending2, Life.invalidated, self.reason, events)
+            f_signalFinish(self.pending3, Life.invalidated, self.reason, events)
+        else
+            self.last_leg_id := frozen.m.id
+            self.last_leg := f_legCopy(frozen)
+            self.previewPivot := na
+            if enableSignals
+                self.secondPoint(frozen, true, events)
+                self.thirdPoint(frozen, true, events)
+            bool hadActive = not na(self.active) and self.active.state != PivotState.completed
+            if not hadActive
+                self.seeds.push(f_legCopy(frozen))
+                if self.seeds.size() > 3
+                    self.seeds.shift()
+                self.seedPivot(events)
+            else
+                ZhongShu p = self.active
+                p.gg := math.max(p.gg, frozen.m.high)
+                p.dd := math.min(p.dd, frozen.m.low)
+                p.m.high := p.gg
+                p.m.low := p.dd
+                p.m.end_index := frozen.m.end_index
+                p.m.end_time := frozen.m.end_time
+                p.m.bar_index := frozen.m.end_index
+                p.m.timestamp := frozen.m.end_time
+                bool waitingRetest = not na(p.departure)
+                if waitingRetest and frozen.m.direction == -p.departure.m.direction
+                    bool outside = p.departure.m.direction == 1 ? frozen.m.low > p.zg : frozen.m.high < p.zd
+                    p.retest_id := frozen.m.id
+                    if outside
+                        self.completePivot(frozen, events)
+                        result := 1
+                    else
+                        p.state := PivotState.extending
+                        p.last_member_id := frozen.m.id
+                        p.reason := "first retest=" + str.tostring(frozen.m.id) + " returned/touched pivot; ZD/ZG fixed"
+                        p.departure := na
+                        p.departure_id := 0
+                        f_emit(events, "return", self.level, frozen.m.direction, 0, Life.confirmed, frozen.m.id, frozen.m.end_index, frozen.m.end_time, frozen.end_price, p.reason)
+                else
+                    bool up = frozen.m.direction == 1 and frozen.end_price > p.zg
+                    bool down = frozen.m.direction == -1 and frozen.end_price < p.zd
+                    if up or down
+                        p.departure := f_legCopy(frozen)
+                        p.departure_id := frozen.m.id
+                        p.retest_id := 0
+                        p.state := up ? PivotState.leavingUp : PivotState.leavingDown
+                        p.reason := "ZS" + str.tostring(p.m.id) + " frozen departure=" + str.tostring(frozen.m.id) + "; 等待首次反向结构"
+                        self.reason3 := "No B3/S3: 突破本身不构成三类点，等待首次回抽"
+                        f_emit(events, "leave", self.level, up ? 1 : -1, 0, Life.confirmed, frozen.m.id, frozen.m.end_index, frozen.m.end_time, frozen.end_price, p.reason)
+                    else
+                        p.state := PivotState.extending
+                        p.last_member_id := frozen.m.id
+                        p.reason := "extends ZS" + str.tostring(p.m.id) + "; 固定 ZD=" + f_num(p.zd) + " ZG=" + f_num(p.zg)
+                self.reason := p.reason
+            if enableSignals
+                self.finishDivergence(frozen, events)
+                if hadActive and self.active.state != PivotState.completed
+                    self.examineDivergence(frozen, events)
+            if not na(self.active) and self.active.state != PivotState.completed
+                if frozen.m.direction == 1
+                    self.active.up_ref := f_legCopy(frozen)
+                else
+                    self.active.down_ref := f_legCopy(frozen)
+            self.trimEvidence()
+    result
+
+// Preview never enters seeds, establishes a center, or freezes evidence.
+method onPreview(PivotEngine self, Leg candidate, array<Event> events) =>
+    self.previewPivot := na
+    if not self.halted
+        if na(candidate)
+            if not na(self.pendingDiv) and not self.pendingDiv.source_frozen
+                self.cancelDivergence("候选输入消失或重建", events)
+            if not na(self.pending2) and not self.pending2.source_frozen
+                f_signalFinish(self.pending2, Life.invalidated, "候选回抽消失或重建", events)
+                self.pending2 := na
+            if not na(self.pending3) and not self.pending3.source_frozen
+                f_signalFinish(self.pending3, Life.invalidated, "候选回抽消失或重建", events)
+                self.pending3 := na
+        else if candidate.m.direction != 0 and not candidate.m.confirmed
+            if not na(self.active) and self.active.state != PivotState.completed
+                self.previewPivot := f_zsCopy(self.active)
+                ZhongShu preview = self.previewPivot
+                preview.m.end_index := candidate.m.end_index
+                preview.m.end_time := candidate.m.end_time
+                if not na(preview.departure) and candidate.m.direction == -preview.departure.m.direction
+                    preview.state := preview.departure.m.direction == 1 ? PivotState.retestingUp : PivotState.retestingDown
+                else if candidate.m.direction == 1 and candidate.end_price > preview.zg
+                    preview.state := PivotState.leavingUp
+                else if candidate.m.direction == -1 and candidate.end_price < preview.zd
+                    preview.state := PivotState.leavingDown
+            if enableSignals
+                self.secondPoint(candidate, false, events)
+                self.thirdPoint(candidate, false, events)
+                self.examineDivergence(candidate, events)
+            self.trimEvidence()
+    0

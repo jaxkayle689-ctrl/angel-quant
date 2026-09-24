@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "binance-quant-starter"
+version = "0.12.0"
+description = "An agent-assisted Binance futures research, monitoring, and paper-trading desktop application."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "websockets>=13,<16",
+  "websocket-client>=1.8,<2",
+  "requests>=2.31,<3",
+  "pandas>=1.5,<2.3",
+  "python-dotenv>=1.0,<2",
+  "urllib3>=1.26,<2",
+  "pywebview==6.2.1; platform_system == 'Darwin'",
+]
+
+[project.scripts]
+bq = "binance_quant.cli:main"
+bq-app = "binance_quant.desktop:main"
+
+[project.optional-dependencies]
+build = ["pyinstaller==6.22.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+binance_quant = ["web/*.html", "web/*.css", "web/*.js", "web/assets/*.png", "web/assets/*.jpg", "web-react/*.html", "web-react/assets/*", "resources/*.txt", "resources/*.json"]

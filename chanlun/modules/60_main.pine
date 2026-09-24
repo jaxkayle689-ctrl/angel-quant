@@ -1,0 +1,212 @@
+// Phases 13–15: incremental scheduler, event dedup, chart layers and diagnostics.
+var InclusionEngine inclusion = f_inclusionEngine()
+var FractalEngine fractals = FractalEngine.new(array.new<ChanBar>())
+var StrokeEngine strokes = StrokeEngine.new(next_id = 1)
+var SegmentEngine segments = f_segmentEngine()
+var PivotEngine lowEngine = f_pivotEngine(1)
+var PivotEngine highEngine = f_pivotEngine(2)
+var MomentumStore momentum = f_momentumStore(areaWindow + 2)
+var LinePool lines = f_newLinePool()
+var MarkPool marks = f_newMarkPool()
+var RangePool pivotBoxes = f_newRangePool(160)
+var RangePool barBoxes = f_newRangePool(80)
+var RangePool featureBoxes = f_newRangePool(48)
+var line candidateStroke = line.new(time, na, time, na, xloc = xloc.bar_time)
+var line candidateSegment = line.new(time, na, time, na, xloc = xloc.bar_time)
+var box candidateBar = box.new(time, na, time, na, xloc = xloc.bar_time)
+var label candidateFractal = label.new(time, na, "", xloc = xloc.bar_time, style = label.style_none)
+var table dashboard = table.new(position.top_right, 2, 22, border_width = 1)
+var array<string> seenEvents = array.new<string>()
+var int startIndex = math.max(0, last_bar_index - maxHistory + 1)
+var string lastSignal = "None"
+var string lastSignalState = "N/A"
+var string lastDiv = "None"
+var int segmentTotal = 0
+var int fullTestCount = 0
+array<Event> events = array.new<Event>()
+array<bool> alerts = array.new<bool>(19, false)
+[macdDif, macdDea, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+if barstate.isfirst and macdFast >= macdSlow
+    runtime.error("MACD Fast 必须小于 Slow")
+if barstate.isfirst and runTests
+    fullTestCount := f_fullSelfTest()
+
+bool inRange = startMode == "固定时间" ? time >= fixedStart : bar_index >= startIndex
+if barstate.isconfirmed
+    if inRange
+        momentum.sample(bar_index, macdDif, macdHist)
+        ChanBar frozenBar = inclusion.ingest(f_rawBar(bar_index, time, na(time_close) ? time : time_close, high, low))
+        if not na(frozenBar)
+            if showBars
+                string caption = debug ? "CB" + str.tostring(frozenBar.m.id) + " raw " + str.tostring(frozenBar.m.start_index) + "–" + str.tostring(frozenBar.m.end_index) + "\nH@" + str.tostring(frozenBar.high_index) + " L@" + str.tostring(frozenBar.low_index) : ""
+                barBoxes.drawRange("CB" + str.tostring(frozenBar.m.id), frozenBar.m.start_time, frozenBar.m.end_time, frozenBar.m.high, frozenBar.m.low, frozenBar.m.direction == 1 ? riseColor : fallColor, caption, true)
+            Fractal f = fractals.onBar(frozenBar)
+            if not na(f)
+                if showFractals
+                    string caption = (f.kind == 1 ? "▼" : "▲") + (debug ? " F" + str.tostring(f.m.id) : "")
+                    label mark = marks.mark("F" + str.tostring(f.m.id), f.m.timestamp, f.price, caption, "F" + str.tostring(f.m.id) + " CB=" + str.tostring(f.left_seq) + "/" + str.tostring(f.center_seq) + "/" + str.tostring(f.right_seq) + "; frozen at " + str.tostring(f.m.confirmed_at_index), f.kind == 1 ? fallColor : riseColor, f.kind == 1, Life.confirmed)
+                    label.set_style(mark, label.style_none)
+                    label.set_textcolor(mark, f.kind == 1 ? fallColor : riseColor)
+                Leg pen = strokes.onFractal(f)
+                if not na(pen)
+                    pen.mom := momentum.measure(pen)
+                    alerts.set(17, true)
+                    if showStrokes
+                        lines.leg(pen, false)
+                    if debug
+                        marks.mark("BI" + str.tostring(pen.m.id), pen.m.end_time, pen.end_price, "BI" + str.tostring(pen.m.id), pen.reason, pen.m.direction == 1 ? riseColor : fallColor, pen.m.direction == 1, Life.confirmed)
+                    lowEngine.onLeg(pen, events)
+                    Leg segment = segments.onStroke(pen, events)
+                    if not na(segment)
+                        segment.mom := momentum.measure(segment)
+                        segmentTotal += 1
+                        if showSegments
+                            lines.leg(segment, true)
+                        if debug or showFeatureFractals
+                            marks.mark("SEG" + str.tostring(segment.m.id), segment.m.end_time, segment.end_price, "SEG" + str.tostring(segment.m.id), segment.reason, segmentColor, segment.m.direction == 1, Life.confirmed)
+                        highEngine.onLeg(segment, events)
+                    if not na(segments.preview)
+                        segments.preview.mom := momentum.measure(segments.preview)
+                    highEngine.onPreview(not na(segments.preview) and segments.preview.count >= 3 ? segments.preview : na, events)
+                    if showHighPivots
+                        f_drawPivots(pivotBoxes, highEngine)
+                if not na(strokes.preview)
+                    strokes.preview.mom := momentum.measure(strokes.preview)
+                lowEngine.onPreview(strokes.preview, events)
+                if showLowPivots
+                    f_drawPivots(pivotBoxes, lowEngine)
+
+// Same source/state alert fires once. Candidate updates still repaint its own label.
+int eventCount = events.size()
+if eventCount > 0
+    for i = 0 to eventCount - 1
+        Event e = events.get(i)
+        f_renderEvent(marks, e, segments.direction)
+        if e.kind == "signal"
+            lastSignal := (e.level == 1 ? lowPrefix : highPrefix) + str.tostring(e.signal_class) + (e.side == 1 ? "BUY" : "SELL")
+            lastSignalState := str.tostring(e.state)
+        if e.kind == "divergence"
+            lastDiv := e.state == Life.invalidated ? "None / 候选失效" : (e.side == 1 ? "Bull " : "Bear ") + str.tostring(e.state)
+        string stateKey = f_eventKey(e) + ":" + str.tostring(e.state)
+        if not seenEvents.includes(stateKey)
+            seenEvents.push(stateKey)
+            if seenEvents.size() > 1200
+                seenEvents.shift()
+            if e.kind == "signal" and e.state != Life.invalidated
+                int slot = (e.signal_class - 1) * 4 + (e.side == 1 ? 0 : 2) + (e.state == Life.confirmed ? 1 : 0)
+                if slot >= 0 and slot < 12
+                    alerts.set(slot, true)
+            else if e.kind == "divergence" and e.state != Life.invalidated
+                alerts.set(e.side == 1 ? 12 : 13, true)
+            else if e.kind == "leave"
+                alerts.set(e.side == 1 ? 14 : 15, true)
+            else if e.kind == "return"
+                alerts.set(16, true)
+            else if e.kind == "segment"
+                alerts.set(18, true)
+
+if barstate.islast
+    f_setPreviewLine(candidateStroke, strokes.preview, showStrokes and showCandidateStrokes, false)
+    f_setPreviewLine(candidateSegment, segments.preview, showSegments and showCandidateSegments, true)
+    Fractal preview = fractals.previewFractal(inclusion.tail)
+    if showFractals and showCandidateFractals and not na(preview)
+        label.set_xy(candidateFractal, preview.m.timestamp, preview.price)
+        label.set_text(candidateFractal, preview.kind == 1 ? "▽" : "△")
+        label.set_textcolor(candidateFractal, color.new(preview.kind == 1 ? fallColor : riseColor, 45))
+        label.set_size(candidateFractal, labelSize)
+        label.set_tooltip(candidateFractal, "候选分型：右侧处理 K 尚未冻结")
+    else
+        label.set_xy(candidateFractal, time, na)
+        label.set_text(candidateFractal, "")
+    if showBars and not na(inclusion.tail)
+        ChanBar tail = inclusion.tail
+        box.set_lefttop(candidateBar, tail.m.start_time, tail.m.high)
+        box.set_rightbottom(candidateBar, tail.m.end_time, tail.m.low)
+        box.set_border_style(candidateBar, line.style_dashed)
+        box.set_border_color(candidateBar, color.gray)
+        box.set_bgcolor(candidateBar, color.new(color.gray, 95))
+        box.set_text(candidateBar, debug ? "CB" + str.tostring(tail.m.id) + " candidate" : "")
+    else
+        box.set_top(candidateBar, na)
+        box.set_bottom(candidateBar, na)
+    int oldFeatures = featureBoxes.ids.size()
+    if oldFeatures > 0
+        for i = 0 to oldFeatures - 1
+            box b = featureBoxes.ids.get(i)
+            box.set_top(b, na)
+            box.set_bottom(b, na)
+            box.set_text(b, "")
+    int featureCount = segments.features.size()
+    if (showFeatures or showFeatureFractals) and featureCount > 0
+        int firstFeature = math.max(0, featureCount - 48)
+        for i = firstFeature to featureCount - 1
+            FeatureElement x = segments.features.get(i)
+            string fx = x.fractal_kind == 1 ? " ▼" : x.fractal_kind == -1 ? " ▲" : ""
+            string caption = "X" + str.tostring(x.m.id) + (showFeatureFractals ? fx : "") + (debug ? " BI" + str.tostring(x.first_child) + "–" + str.tostring(x.last_child) + (x.gap_before ? " GAP" : "") : "")
+            if showFeatures or x.fractal_kind != 0
+                featureBoxes.drawRange("X" + str.tostring(x.m.id), x.m.start_time, x.m.end_time, x.m.high, x.m.low, segmentColor, caption, x.m.confirmed)
+    // Extending to latest bar changes display only. The seed price band stays fixed.
+    if extendPivots
+        if showLowPivots and not na(lowEngine.active) and lowEngine.active.state != PivotState.completed
+            ZhongShu view = f_zsCopy(lowEngine.active)
+            view.m.end_time := na(time_close) ? time : time_close
+            f_drawPivot(pivotBoxes, view, 1)
+        if showHighPivots and not na(highEngine.active) and highEngine.active.state != PivotState.completed
+            ZhongShu view = f_zsCopy(highEngine.active)
+            view.m.end_time := na(time_close) ? time : time_close
+            f_drawPivot(pivotBoxes, view, 2)
+    if showDashboard
+        string tf = timeframe.isminutes ? (timeframe.multiplier % 60 == 0 ? str.tostring(timeframe.multiplier / 60) + "H" : timeframe.period + "m") : timeframe.period
+        ZhongShu lp = lowEngine.active
+        ZhongShu hp = highEngine.active
+        ZhongShu positionPivot = not na(hp) ? hp : lp
+        string location = na(positionPivot) ? "N/A" : close > positionPivot.zg ? "中枢上方" : close < positionPivot.zd ? "中枢下方" : "中枢内"
+        string movement = not na(hp) ? highEngine.moveType : lowEngine.moveType
+        f_cell(dashboard, 0, "CHAN THEORY", "Structure Pro · " + algoMode)
+        f_cell(dashboard, 1, "周期 / 结构级别", tf + " / L笔 · H线段")
+        f_cell(dashboard, 2, "笔 / 已确认数量", (na(strokes.preview) ? "?" : f_dir(strokes.preview.m.direction)) + " / " + str.tostring(strokes.total))
+        f_cell(dashboard, 3, "线段 / 已确认数量", f_dir(segments.direction) + " candidate / " + str.tostring(segmentTotal))
+        f_cell(dashboard, 4, "走势", movement)
+        f_cell(dashboard, 5, "笔中枢 ZD–ZG", na(lp) ? "N/A" : f_num(lp.zd) + " – " + f_num(lp.zg))
+        f_cell(dashboard, 6, "线段中枢 ZD–ZG", na(hp) ? "N/A" : f_num(hp.zd) + " – " + f_num(hp.zg))
+        f_cell(dashboard, 7, "价格位置", location)
+        f_cell(dashboard, 8, "最近买卖点 / 状态", lastSignal + " / " + lastSignalState)
+        f_cell(dashboard, 9, "MACD / DIV", (macdDif >= 0 ? "Above Zero" : "Below Zero") + " / " + lastDiv)
+        f_cell(dashboard, 10, "笔中枢状态", na(lp) ? "等待三笔重叠" : str.tostring(lp.state))
+        f_cell(dashboard, 11, "线段中枢状态", na(hp) ? "等待三线段重叠" : str.tostring(hp.state))
+        f_cell(dashboard, 12, "引擎 / 自检", (segments.blocked or lowEngine.halted or highEngine.halted ? "有层暂停，见 Debug" : "收盘增量确认") + (runTests ? " / " + str.tostring(fullTestCount) + " PASS" : ""), segments.blocked or lowEngine.halted or highEngine.halted)
+        if debug
+            f_cell(dashboard, 13, "CB / F / 起点跳过", str.tostring(inclusion.total) + " / " + str.tostring(fractals.total) + " / " + str.tostring(inclusion.skipped))
+            f_cell(dashboard, 14, "笔证据", strokes.reason)
+            f_cell(dashboard, 15, "线段证据", segments.reason, segments.blocked)
+            f_cell(dashboard, 16, "L 中枢证据", lowEngine.reason)
+            f_cell(dashboard, 17, "H 中枢证据", highEngine.reason)
+            f_cell(dashboard, 18, "L 一/二类点", lowEngine.reason1 + "\n" + lowEngine.reason2)
+            f_cell(dashboard, 19, "L 三类点", lowEngine.reason3)
+            f_cell(dashboard, 20, "H 一/二/三类点", highEngine.reason1 + "\n" + highEngine.reason2 + "\n" + highEngine.reason3)
+            f_cell(dashboard, 21, "对象 / 特征缓存", str.tostring(lines.ids.size()) + " lines / " + str.tostring(marks.ids.size()) + " labels / X" + str.tostring(featureCount))
+        else
+            table.clear(dashboard, 0, 13, 1, 21)
+    else
+        table.clear(dashboard, 0, 0, 1, 21)
+
+alertcondition(alerts.get(0), "1buy candidate", "Chan L/H 1buy Candidate. Inspect label for level and structural evidence.")
+alertcondition(alerts.get(1), "1buy confirmed", "Chan L/H 1buy Confirmed on this bar; endpoint may be earlier.")
+alertcondition(alerts.get(2), "1sell candidate", "Chan L/H 1sell Candidate. Inspect label for level and structural evidence.")
+alertcondition(alerts.get(3), "1sell confirmed", "Chan L/H 1sell Confirmed on this bar; endpoint may be earlier.")
+alertcondition(alerts.get(4), "2buy candidate", "Chan L/H 2buy Candidate: first pullback after confirmed 1buy.")
+alertcondition(alerts.get(5), "2buy confirmed", "Chan L/H 2buy Confirmed: first pullback holds the 1buy low.")
+alertcondition(alerts.get(6), "2sell candidate", "Chan L/H 2sell Candidate: first rebound after confirmed 1sell.")
+alertcondition(alerts.get(7), "2sell confirmed", "Chan L/H 2sell Confirmed: first rebound holds the 1sell high.")
+alertcondition(alerts.get(8), "3buy candidate", "Chan L/H 3buy Candidate: departure then first retest strictly above ZG.")
+alertcondition(alerts.get(9), "3buy confirmed", "Chan L/H 3buy Confirmed: first retest structure frozen above ZG.")
+alertcondition(alerts.get(10), "3sell candidate", "Chan L/H 3sell Candidate: departure then first retest strictly below ZD.")
+alertcondition(alerts.get(11), "3sell confirmed", "Chan L/H 3sell Confirmed: first retest structure frozen below ZD.")
+alertcondition(alerts.get(12), "Bullish divergence", "Chan L/H bullish structural divergence event. Inspect Candidate/Confirmed state.")
+alertcondition(alerts.get(13), "Bearish divergence", "Chan L/H bearish structural divergence event. Inspect Candidate/Confirmed state.")
+alertcondition(alerts.get(14), "向上离开中枢", "Chan frozen structure left a pivot upward; breakout alone is not 3buy.")
+alertcondition(alerts.get(15), "向下离开中枢", "Chan frozen structure left a pivot downward; breakout alone is not 3sell.")
+alertcondition(alerts.get(16), "回到中枢", "Chan first frozen retest returned to or touched its pivot.")
+alertcondition(alerts.get(17), "新笔确认", "Chan new stroke confirmed on this closed bar.")
+alertcondition(alerts.get(18), "新线段确认", "Chan new segment confirmed with feature/reversal evidence.")

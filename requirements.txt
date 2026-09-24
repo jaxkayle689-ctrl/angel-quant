@@ -1,0 +1,9 @@
+requests>=2.31,<3
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+websockets>=13,<16
+websocket-client>=1.8,<2
+pandas>=1.5,<2.3
+python-dotenv>=1.0,<2
+urllib3>=1.26,<2
+pywebview==6.2.1; platform_system == "Darwin"

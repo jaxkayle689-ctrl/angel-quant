@@ -1,0 +1,145 @@
+//@version=6
+indicator("Chan Theory Complete | Chanlun Structure Pro", overlay = true, max_lines_count = 480, max_boxes_count = 420, max_labels_count = 480, max_bars_back = 5000)
+// Independent implementation. Frozen events commit on closed bars only.
+// Endpoint time is historical; confirmation/alert time is the later evidence bar.
+
+enum Life
+    candidate = "Candidate"
+    confirmed = "Confirmed"
+    invalidated = "Invalidated"
+
+type Meta
+    int id = 0
+    int bar_index = 0
+    int timestamp = 0
+    float high = na
+    float low = na
+    int direction = 0
+    bool confirmed = false
+    int start_index = 0
+    int end_index = 0
+    int start_time = 0
+    int end_time = 0
+    int confirmed_at_index = na
+    int confirmed_at_time = na
+
+type Momentum
+    float area = 0.0
+    float peak = 0.0
+    float hist_peak = 0.0
+    int bars = 0
+    bool complete = false
+
+type Leg
+    Meta m
+    float start_price = na
+    float end_price = na
+    int first_child = 0
+    int last_child = 0
+    int count = 1
+    Momentum mom
+    string reason = ""
+
+type Event
+    string kind = ""
+    int level = 0
+    int side = 0
+    int signal_class = 0
+    Life state = Life.candidate
+    int source_id = 0
+    int index = 0
+    int ts = 0
+    float price = na
+    string reason = ""
+
+string algoMode = input.string("完整", "算法模式", options = ["完整", "Core"], group = "基础")
+bool enableSignals = algoMode == "完整"
+int maxHistory = input.int(2000, "最大历史长度", options = [500, 1000, 2000, 5000], group = "基础")
+string startMode = input.string("最近历史", "计算起点", options = ["最近历史", "固定时间"], group = "基础")
+int fixedStart = input.time(timestamp("01 Jan 2024 00:00 +0000"), "固定开始时间", group = "基础")
+bool debug = input.bool(false, "Debug / 结构证据", group = "基础")
+bool runTests = input.bool(false, "运行内置验收断言", group = "基础")
+bool removeInclusion = input.bool(true, "处理包含关系", group = "K线")
+bool showBars = input.bool(false, "显示处理后 K 线范围", group = "K线")
+bool showFractals = input.bool(false, "显示分型", group = "分型")
+bool strictFractal = input.bool(true, "严格分型模式", group = "分型")
+bool showCandidateFractals = input.bool(true, "显示未确认分型", group = "分型")
+bool showStrokes = input.bool(true, "显示笔", group = "笔")
+string strokeMode = input.string("严格笔", "笔模式", options = ["严格笔", "新笔"], group = "笔")
+int minBars = input.int(4, "两中心在内最少处理 K 数", minval = 4, maxval = 30, group = "笔")
+bool showCandidateStrokes = input.bool(true, "显示未确认笔", group = "笔")
+bool showSegments = input.bool(true, "显示线段", group = "线段")
+bool strictSegment = input.bool(true, "严格线段模式", group = "线段")
+bool gapConfirm = input.bool(true, "缺口二次确认（关闭时缺口候选不锁定）", group = "线段")
+bool showCandidateSegments = input.bool(true, "显示未确认线段", group = "线段")
+bool showFeatures = input.bool(false, "显示活动特征序列", group = "线段")
+bool showFeatureFractals = input.bool(false, "显示特征序列分型证据", group = "线段")
+bool showLowPivots = input.bool(true, "显示笔中枢 / 次级别", group = "中枢")
+bool showHighPivots = input.bool(true, "显示线段中枢 / 本级别", group = "中枢")
+bool showBounds = input.bool(true, "显示 ZG / ZD", group = "中枢")
+bool extendPivots = input.bool(true, "活动中枢延伸显示", group = "中枢")
+bool showClass1 = input.bool(true, "显示一类买卖点", group = "买卖点")
+bool showClass2 = input.bool(true, "显示二类买卖点", group = "买卖点")
+bool showClass3 = input.bool(true, "显示三类买卖点", group = "买卖点")
+bool showCandidateSignals = input.bool(true, "显示候选信号", group = "买卖点")
+bool showInvalidated = input.bool(false, "保留失效 X 标记", group = "买卖点")
+bool videoSpecialB2 = input.bool(true, "视频特殊二类点（允许轻微越过一类点）", group = "买卖点")
+float specialB2Tolerance = input.float(0.5, "特殊二类点最大越界 %", minval = 0.1, maxval = 3.0, step = 0.1, group = "买卖点") / 100.0
+bool trendFilter = input.bool(false, "大结构方向过滤（弱化逆向标签）", group = "买卖点")
+string lowPrefix = input.string("L", "笔级标签前缀", group = "买卖点")
+string highPrefix = input.string("H", "线段级标签前缀", group = "买卖点")
+bool showDivergence = input.bool(true, "显示背驰", group = "背驰")
+string divAlgorithm = input.string("综合模式", "背驰算法", options = ["MACD柱面积", "DIF峰值", "综合模式"], group = "背驰")
+float divRatio = input.float(0.85, "背驰灵敏度 / 力度比例上限", minval = 0.5, maxval = 1.0, step = 0.05, group = "背驰")
+int areaWindow = input.int(2000, "MACD 面积最大结构长度", minval = 50, maxval = 5000, group = "背驰")
+int macdFast = input.int(12, "Fast", minval = 1, group = "MACD")
+int macdSlow = input.int(26, "Slow", minval = 2, group = "MACD")
+int macdSignal = input.int(9, "Signal", minval = 1, group = "MACD")
+bool monochrome = input.bool(true, "笔统一颜色", group = "外观")
+color strokeColor = input.color(color.black, "统一笔颜色", group = "外观")
+color riseColor = input.color(color.teal, "上涨笔颜色", group = "外观")
+color fallColor = input.color(color.red, "下跌笔颜色", group = "外观")
+color segmentColor = input.color(color.blue, "线段颜色", group = "外观")
+color lowPivotColor = input.color(color.blue, "笔中枢颜色", group = "外观")
+color highPivotColor = input.color(color.orange, "线段中枢颜色", group = "外观")
+color buyColor = input.color(color.green, "一/三买颜色", group = "外观")
+color buy2Color = input.color(color.aqua, "二买颜色", group = "外观")
+color sellColor = input.color(color.red, "一/三卖颜色", group = "外观")
+color sell2Color = input.color(color.orange, "二卖颜色", group = "外观")
+int strokeWidth = input.int(1, "笔线宽", minval = 1, maxval = 3, group = "外观")
+int segmentWidth = input.int(3, "线段线宽", minval = 2, maxval = 5, group = "外观")
+int pivotAlpha = input.int(88, "中枢透明度", minval = 50, maxval = 98, group = "外观")
+string labelSize = input.string(size.tiny, "标签大小", options = [size.tiny, size.small, size.normal], group = "外观")
+bool showDashboard = input.bool(true, "显示 Dashboard", group = "外观")
+
+f_contains(float ah, float al, float bh, float bl) =>
+    (ah >= bh and al <= bl) or (bh >= ah and bl <= al)
+
+f_relation(float ah, float al, float bh, float bl) =>
+    bh > ah and bl > al ? 1 : bh < ah and bl < al ? -1 : 0
+
+f_fractalKind(float ah, float al, float bh, float bl, float ch, float cl, bool strict) =>
+    bool top = strict ? bh > ah and bh > ch and bl > al and bl > cl : bh >= ah and bh >= ch and bl >= al and bl >= cl and (bh > ah or bl > al) and (bh > ch or bl > cl)
+    bool bottom = strict ? bh < ah and bh < ch and bl < al and bl < cl : bh <= ah and bh <= ch and bl <= al and bl <= cl and (bh < ah or bl < al) and (bh < ch or bl < cl)
+    top and not bottom ? 1 : bottom and not top ? -1 : 0
+
+f_meta(int id, int si, int st, int ei, int et, float sp, float ep, bool confirmed) =>
+    Meta.new(id, ei, et, math.max(sp, ep), math.min(sp, ep), ep > sp ? 1 : ep < sp ? -1 : 0, confirmed, si, ei, st, et, confirmed ? bar_index : na, confirmed ? (na(time_close) ? time : time_close) : na)
+
+f_legCopy(Leg x) =>
+    Leg result = na
+    if not na(x)
+        result := Leg.new(x.m.copy(), x.start_price, x.end_price, x.first_child, x.last_child, x.count, na(x.mom) ? Momentum.new() : x.mom.copy(), x.reason)
+    result
+
+f_overlap3(Leg a, Leg b, Leg c) =>
+    [math.max(a.m.low, math.max(b.m.low, c.m.low)), math.min(a.m.high, math.min(b.m.high, c.m.high))]
+
+f_emit(array<Event> events, string kind, int level, int side, int cls, Life state, int id, int ix, int ts, float price, string reason) =>
+    events.push(Event.new(kind, level, side, cls, state, id, ix, ts, price, reason))
+
+f_num(float x) =>
+    na(x) ? "N/A" : str.tostring(x, format.mintick)
+
+f_dir(int x) =>
+    x == 1 ? "↑" : x == -1 ? "↓" : "?"

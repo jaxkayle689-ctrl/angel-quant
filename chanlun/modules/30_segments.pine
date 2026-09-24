@@ -1,0 +1,361 @@
+// -----------------------------------------------------------------------------
+// Segments. Only frozen strokes enter this module. The feature tail remains
+// mutable until another non-containing feature arrives; only THREE FROZEN
+// feature elements can establish an endpoint. This deliberate extra delay avoids
+// accepting a right-hand feature which later inclusion would change.
+// -----------------------------------------------------------------------------
+type FeatureElement
+    Meta m
+    int first_child = 0
+    int last_child = 0
+    int count = 1
+    int high_child = 0
+    int low_child = 0
+    int high_index = 0
+    int high_time = 0
+    int low_index = 0
+    int low_time = 0
+    bool gap_before = false
+    int fractal_kind = 0
+
+type FeatureStream
+    array<FeatureElement> items
+    int owner_direction = 0
+    int merge_direction = 0
+    int last_child = 0
+    FeatureElement fractal_a = na
+    FeatureElement fractal_b = na
+    FeatureElement fractal_c = na
+
+f_featureStream(int owner) =>
+    FeatureStream.new(items = array.new<FeatureElement>(), owner_direction = owner)
+
+f_featureFromLeg(Leg s) =>
+    bool up = s.m.direction > 0
+    Meta fm = s.m.copy()
+    fm.confirmed := false
+    fm.confirmed_at_index := na
+    fm.confirmed_at_time := na
+    FeatureElement.new(m = fm, first_child = s.m.id, last_child = s.m.id, high_child = s.m.id, low_child = s.m.id, high_index = up ? s.m.end_index : s.m.start_index, high_time = up ? s.m.end_time : s.m.start_time, low_index = up ? s.m.start_index : s.m.end_index, low_time = up ? s.m.start_time : s.m.end_time)
+
+// Inclusion uses the movement of feature INTERVALS. Before the first distinct
+// interval pair, the established owner segment supplies the initial direction;
+// it never uses the opposing stroke's direction as the merge direction.
+method addFeature(FeatureStream self, Leg s) =>
+    bool found = false
+    self.fractal_a := na
+    self.fractal_b := na
+    self.fractal_c := na
+    if s.m.direction == -self.owner_direction and s.m.id > self.last_child
+        self.last_child := s.m.id
+        FeatureElement incoming = f_featureFromLeg(s)
+        int n = array.size(self.items)
+        if n == 0
+            array.push(self.items, incoming)
+        else
+            FeatureElement tail = array.get(self.items, n - 1)
+            if f_contains(tail.m.high, tail.m.low, incoming.m.high, incoming.m.low)
+                int mergeDir = self.merge_direction == 0 ? self.owner_direction : self.merge_direction
+                bool takeHigh = mergeDir > 0 ? incoming.m.high > tail.m.high : incoming.m.high < tail.m.high
+                bool takeLow = mergeDir > 0 ? incoming.m.low > tail.m.low : incoming.m.low < tail.m.low
+                if takeHigh
+                    tail.m.high := incoming.m.high
+                    tail.high_child := incoming.high_child
+                    tail.high_index := incoming.high_index
+                    tail.high_time := incoming.high_time
+                if takeLow
+                    tail.m.low := incoming.m.low
+                    tail.low_child := incoming.low_child
+                    tail.low_index := incoming.low_index
+                    tail.low_time := incoming.low_time
+                tail.last_child := incoming.last_child
+                tail.count += 1
+                tail.m.end_index := incoming.m.end_index
+                tail.m.end_time := incoming.m.end_time
+            else
+                self.merge_direction := f_relation(tail.m.high, tail.m.low, incoming.m.high, incoming.m.low)
+                tail.m.confirmed := true
+                tail.m.confirmed_at_index := bar_index
+                tail.m.confirmed_at_time := time
+                incoming.gap_before := incoming.m.low > tail.m.high or incoming.m.high < tail.m.low
+                array.push(self.items, incoming)
+                int sizeNow = array.size(self.items)
+                if sizeNow >= 4
+                    FeatureElement a = array.get(self.items, sizeNow - 4)
+                    FeatureElement b = array.get(self.items, sizeNow - 3)
+                    FeatureElement c = array.get(self.items, sizeNow - 2)
+                    int kind = f_fractalKind(a.m.high, a.m.low, b.m.high, b.m.low, c.m.high, c.m.low, strictFractal)
+                    if kind == self.owner_direction
+                        b.fractal_kind := kind
+                        self.fractal_a := a
+                        self.fractal_b := b
+                        self.fractal_c := c
+                        found := true
+    found
+
+type SegmentEngine
+    array<Leg> pending
+    array<FeatureElement> features
+    FeatureStream primary
+    FeatureStream secondary
+    Leg preview = na
+    Leg candidate = na
+    string reason = "等待至少三笔共同重叠"
+    int direction = 0
+    int next_id = 1
+    int last_stroke_id = 0
+    int candidate_end_pos = -1
+    int candidate_feature_id = 0
+    int secondary_id = 0
+    int skipped_strokes = 0
+    int processed_strokes = 0
+    float running_high = na
+    float running_low = na
+    float boundary_first_end = na
+    bool candidate_gap = false
+    bool candidate_boundary = false
+    bool boundary_broken = false
+    bool seeded = false
+    bool anchored = false
+    bool blocked = false
+
+f_segmentEngine() =>
+    FeatureStream primary = f_featureStream(0)
+    SegmentEngine.new(pending = array.new<Leg>(), features = primary.items, primary = primary, secondary = f_featureStream(0))
+
+f_segmentSeedOK(Leg a, Leg b, Leg c) =>
+    [zd, zg] = f_overlap3(a, b, c)
+    a.m.direction != 0 and b.m.direction == -a.m.direction and c.m.direction == a.m.direction and zg > zd and (c.end_price - a.start_price) * a.m.direction > 0
+
+method updateSegmentPreview(SegmentEngine self, Leg s) =>
+    if na(self.preview)
+        Leg first = array.get(self.pending, 0)
+        self.preview := Leg.new(m = f_meta(self.next_id, first.m.start_index, first.m.start_time, first.m.end_index, first.m.end_time, first.start_price, first.end_price, false), start_price = first.start_price, end_price = first.end_price, first_child = first.m.id, last_child = first.m.id, mom = Momentum.new(), reason = "等待有效特征序列分型")
+    if s.m.direction == self.direction and (s.end_price - self.preview.end_price) * self.direction > 0
+        self.preview.m.end_index := s.m.end_index
+        self.preview.m.end_time := s.m.end_time
+        self.preview.m.bar_index := s.m.end_index
+        self.preview.m.timestamp := s.m.end_time
+        self.preview.m.high := self.running_high
+        self.preview.m.low := self.running_low
+        self.preview.end_price := s.end_price
+        self.preview.last_child := s.m.id
+        self.preview.count := self.processed_strokes
+    0
+
+method clearSegmentCandidate(SegmentEngine self, string why) =>
+    self.candidate := na
+    self.candidate_end_pos := -1
+    self.candidate_feature_id := 0
+    self.candidate_gap := false
+    self.candidate_boundary := false
+    self.boundary_broken := false
+    self.boundary_first_end := na
+    self.secondary_id := 0
+    self.secondary := f_featureStream(-self.direction)
+    self.reason := why
+    0
+
+method segmentReverseReady(SegmentEngine self) =>
+    bool ready = false
+    int begin = self.candidate_end_pos + 1
+    if not na(self.candidate) and begin >= 0 and array.size(self.pending) >= begin + 3
+        Leg a = array.get(self.pending, begin)
+        Leg b = array.get(self.pending, begin + 1)
+        Leg c = array.get(self.pending, begin + 2)
+        ready := a.m.direction == -self.direction and f_segmentSeedOK(a, b, c)
+    ready
+
+method rebuildSecondary(SegmentEngine self) =>
+    self.secondary := f_featureStream(-self.direction)
+    self.secondary_id := 0
+    int begin = self.candidate_end_pos + 1
+    int n = array.size(self.pending)
+    if begin >= 0 and n > begin
+        for i = begin to n - 1
+            Leg s = array.get(self.pending, i)
+            bool found = self.secondary.addFeature(s)
+            if found and self.secondary_id == 0
+                self.secondary_id := self.secondary.fractal_b.m.id
+    0
+
+// Locate the original extremum's source stroke, not the synthetic feature's
+// last bar. A downward feature's HIGH starts the first reverse stroke; a rising
+// feature's LOW does the same for a downward owner segment.
+method considerSegmentEndpoint(SegmentEngine self) =>
+    FeatureElement a = self.primary.fractal_a
+    FeatureElement b = self.primary.fractal_b
+    if not na(a) and not na(b)
+        int source = self.direction > 0 ? b.high_child : b.low_child
+        int sourcePos = -1
+        int n = array.size(self.pending)
+        if n > 0
+            for i = 0 to n - 1
+                if array.get(self.pending, i).m.id == source
+                    sourcePos := i
+                    break
+        // sourcePos equals the number of original strokes before the reversal.
+        if sourcePos >= 3 and sourcePos < n
+            Leg first = array.get(self.pending, 0)
+            Leg endpoint = array.get(self.pending, sourcePos - 1)
+            bool originalExtreme = (endpoint.end_price - self.preview.end_price) * self.direction >= 0
+            bool oriented = endpoint.m.direction == self.direction and (endpoint.end_price - first.start_price) * self.direction > 0
+            bool newer = na(self.candidate) ? true : endpoint.m.end_index > self.candidate.m.end_index
+            if originalExtreme and oriented and newer
+                self.candidate_end_pos := sourcePos - 1
+                self.candidate_feature_id := b.m.id
+                // The defining gap is between FIRST and SECOND elements only.
+                self.candidate_gap := b.m.low > a.m.high or b.m.high < a.m.low
+                self.candidate_boundary := false
+                string evidence = "BI" + str.tostring(first.m.id) + "–BI" + str.tostring(endpoint.m.id) + "; X" + str.tostring(a.m.id) + "/X" + str.tostring(b.m.id) + "/X" + str.tostring(self.primary.fractal_c.m.id)
+                self.candidate := Leg.new(m = f_meta(self.next_id, first.m.start_index, first.m.start_time, endpoint.m.end_index, endpoint.m.end_time, first.start_price, endpoint.end_price, false), start_price = first.start_price, end_price = endpoint.end_price, first_child = first.m.id, last_child = endpoint.m.id, count = sourcePos, mom = Momentum.new(), reason = evidence)
+                self.reason := self.candidate_gap ? "特征分型有缺口：等待反向特征分型二次确认" : "无缺口特征分型：等待反向结构确认"
+                self.rebuildSecondary()
+    0
+
+// Boundary exception (original lessons 71/78): when the FIRST stroke from the
+// proposed endpoint already breaks the previous opposing-stroke interval, it
+// must not erase the turn by being merged across the hypothetical boundary.
+// Keep both hypotheses: the normal stream can still extend if this candidate
+// fails; the boundary branch needs a reverse overlapping triple and a later
+// reverse stroke which breaks the FIRST reverse stroke's endpoint. A large
+// reverse stroke by itself never ends a segment.
+method considerBoundaryBreak(SegmentEngine self, Leg s) =>
+    int nf = array.size(self.primary.items)
+    if na(self.candidate) and s.m.direction == -self.direction and self.processed_strokes >= 4 and nf > 0 and s.start_price == self.preview.end_price
+        FeatureElement previousFeature = array.get(self.primary.items, nf - 1)
+        bool outside = f_contains(previousFeature.m.high, previousFeature.m.low, s.m.high, s.m.low)
+        bool breaksPrevious = self.direction > 0 ? s.end_price < previousFeature.m.low : s.end_price > previousFeature.m.high
+        if outside and breaksPrevious
+            int endPos = self.processed_strokes - 2
+            Leg first = array.get(self.pending, 0)
+            Leg endpoint = array.get(self.pending, endPos)
+            if endpoint.m.direction == self.direction and endpoint.end_price == s.start_price
+                self.candidate_end_pos := endPos
+                self.candidate_feature_id := previousFeature.m.id
+                self.candidate_gap := false
+                self.candidate_boundary := true
+                self.boundary_broken := false
+                self.boundary_first_end := s.end_price
+                string why = "BI" + str.tostring(first.m.id) + "–BI" + str.tostring(endpoint.m.id) + "; boundary X" + str.tostring(previousFeature.m.id) + "; first reverse BI" + str.tostring(s.m.id) + " broke prior feature"
+                self.candidate := Leg.new(m = f_meta(self.next_id, first.m.start_index, first.m.start_time, endpoint.m.end_index, endpoint.m.end_time, first.start_price, endpoint.end_price, false), start_price = first.start_price, end_price = endpoint.end_price, first_child = first.m.id, last_child = endpoint.m.id, count = endPos + 1, mom = Momentum.new(), reason = why)
+                self.secondary := f_featureStream(-self.direction)
+                self.reason := "边界包含例外：首笔破坏，等待反向三笔及突破首笔终点"
+    0
+
+method ingestSegmentTail(SegmentEngine self, Leg s) =>
+    self.processed_strokes += 1
+    self.running_high := na(self.running_high) ? s.m.high : math.max(self.running_high, s.m.high)
+    self.running_low := na(self.running_low) ? s.m.low : math.min(self.running_low, s.m.low)
+    self.updateSegmentPreview(s)
+    if not na(self.candidate) and (s.end_price - self.candidate.end_price) * self.direction > 0
+        self.clearSegmentCandidate("原方向创新极值，旧结束候选失效")
+    self.considerBoundaryBreak(s)
+    if self.candidate_boundary and s.m.direction == -self.direction and (s.end_price - self.boundary_first_end) * self.direction < 0
+        self.boundary_broken := true
+    bool primaryFractal = self.primary.addFeature(s)
+    if primaryFractal
+        self.considerSegmentEndpoint()
+    if not na(self.candidate)
+        bool secondFractal = self.secondary.addFeature(s)
+        if secondFractal and self.secondary_id == 0
+            self.secondary_id := self.secondary.fractal_b.m.id
+    0
+
+// Replays only the bounded, unassigned tail after a confirmed segment. The
+// settled historical prefix is never scanned or modified. At initial startup,
+// triples that fail the seed rule are skipped with a diagnostic count. Once an
+// endpoint has been fixed, the next segment stays anchored to that endpoint.
+method seedSegment(SegmentEngine self) =>
+    int n = array.size(self.pending)
+    if not self.seeded and n >= 3
+        bool searching = true
+        while searching and array.size(self.pending) >= 3
+            Leg a = array.get(self.pending, 0)
+            Leg b = array.get(self.pending, 1)
+            Leg c = array.get(self.pending, 2)
+            if f_segmentSeedOK(a, b, c)
+                self.direction := a.m.direction
+                self.primary := f_featureStream(self.direction)
+                self.features := self.primary.items
+                self.secondary := f_featureStream(-self.direction)
+                self.preview := na
+                self.processed_strokes := 0
+                self.running_high := na
+                self.running_low := na
+                self.seeded := true
+                self.reason := "前三笔已重叠；等待特征分型，允许 5/7/9 笔持续延伸"
+                int remaining = array.size(self.pending)
+                for i = 0 to remaining - 1
+                    self.ingestSegmentTail(array.get(self.pending, i))
+                searching := false
+            else if self.anchored
+                self.reason := "冻结端点后的前三笔未形成反向重叠，保持等待"
+                searching := false
+            else
+                array.shift(self.pending)
+                self.skipped_strokes += 1
+    0
+
+method onStroke(SegmentEngine self, Leg frozenStroke, array<Event> events) =>
+    Leg completed = na
+    if not na(frozenStroke) and not self.blocked and frozenStroke.m.id > self.last_stroke_id
+        bool valid = frozenStroke.m.confirmed and not na(frozenStroke.start_price) and not na(frozenStroke.end_price) and frozenStroke.m.direction != 0 and frozenStroke.m.end_index > frozenStroke.m.start_index
+        int n = array.size(self.pending)
+        if valid and n > 0
+            Leg previous = array.get(self.pending, n - 1)
+            valid := previous.m.direction == -frozenStroke.m.direction and previous.m.end_index == frozenStroke.m.start_index and previous.end_price == frozenStroke.start_price
+        if not valid
+            self.blocked := true
+            self.reason := "线段层暂停：输入笔未冻结、方向不交替或端点不连续"
+        else if n >= math.min(maxHistory, 1200)
+            self.blocked := true
+            self.reason := "线段层暂停：未完成笔缓存已满，拒绝强制切段"
+        else
+            self.last_stroke_id := frozenStroke.m.id
+            array.push(self.pending, f_legCopy(frozenStroke))
+            if self.seeded
+                self.ingestSegmentTail(frozenStroke)
+            else
+                self.seedSegment()
+            if not na(self.candidate)
+                bool reverseReady = self.segmentReverseReady()
+                // Disabling the gap switch suppresses GAP segments. It never
+                // silently turns the required second confirmation into a pass.
+                bool gapReady = not self.candidate_gap or (gapConfirm and self.secondary_id > 0 and reverseReady)
+                bool reversalReady = not strictSegment or reverseReady
+                bool boundaryReady = not self.candidate_boundary or (reverseReady and self.boundary_broken)
+                if self.candidate_gap and not gapConfirm
+                    self.reason := "缺口确认已关闭：保留候选，不发布缺口线段"
+                else if self.candidate_gap and self.secondary_id == 0
+                    self.reason := "缺口线段等待反方向特征分型二次确认"
+                else if not reversalReady
+                    self.reason := "等待从候选端点开始的反向三笔共同重叠"
+                else if not boundaryReady
+                    self.reason := "首笔破坏不足以结束：等待反向三笔并突破首笔终点"
+                if gapReady and reversalReady and boundaryReady
+                    completed := f_legCopy(self.candidate)
+                    completed.m.confirmed := true
+                    completed.m.confirmed_at_index := bar_index
+                    completed.m.confirmed_at_time := time
+                    completed.reason += self.candidate_boundary ? "; boundary inclusion exception; reverse endpoint broken" : self.candidate_gap ? "; gap; secondary X" + str.tostring(self.secondary_id) : "; no gap"
+                    completed.reason += strictSegment ? "; reverse triple confirmed" : "; standard feature confirmation"
+                    int consumed = self.candidate_end_pos + 1
+                    for i = 0 to consumed - 1
+                        Leg child = array.shift(self.pending)
+                        // An unsuccessful one-stroke break can leave an internal
+                        // extremum outside the endpoints (lesson 78). Preserve
+                        // its real interval for higher-level pivot calculation.
+                        completed.m.high := math.max(completed.m.high, child.m.high)
+                        completed.m.low := math.min(completed.m.low, child.m.low)
+                    f_emit(events, "segment", 1, completed.m.direction, 0, Life.confirmed, completed.m.id, completed.m.end_index, completed.m.end_time, completed.end_price, completed.reason)
+                    self.next_id += 1
+                    self.anchored := true
+                    self.seeded := false
+                    self.preview := na
+                    self.clearSegmentCandidate("新线段已冻结；反向尾部继续递推")
+                    self.primary := f_featureStream(-self.direction)
+                    self.features := self.primary.items
+                    self.direction := -self.direction
+                    self.seedSegment()
+    completed

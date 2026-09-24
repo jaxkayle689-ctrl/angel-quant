@@ -1,0 +1,228 @@
+// Phase 1: direction-aware inclusion, closed raw bars only.
+type ChanBar
+    Meta m
+    int high_index = 0
+    int low_index = 0
+    int high_time = 0
+    int low_time = 0
+    int raw_count = 1
+
+type InclusionEngine
+    ChanBar tail
+    array<ChanBar> unresolved
+    int direction = 0
+    int next_id = 0
+    int skipped = 0
+    int total = 0
+
+f_inclusionEngine() =>
+    InclusionEngine.new(unresolved = array.new<ChanBar>())
+
+f_rawBar(int ix, int ts, int et, float hi, float lo) =>
+    Meta m = Meta.new(0, ix, ts, hi, lo, 0, false, ix, ix, ts, et, na, na)
+    ChanBar.new(m, ix, ix, ts, ts, 1)
+
+f_barCopy(ChanBar x) =>
+    ChanBar.new(x.m.copy(), x.high_index, x.low_index, x.high_time, x.low_time, x.raw_count)
+
+// The video determines inclusion direction from established neighbouring
+// structure. At the left boundary there is no direction yet, so keep every raw
+// bar and replay the whole containing prefix once the first direction appears.
+method resolvePrefix(InclusionEngine self, int direction) =>
+    ChanBar merged = f_barCopy(self.unresolved.get(0))
+    int n = self.unresolved.size()
+    if n > 1
+        for i = 1 to n - 1
+            ChanBar item = self.unresolved.get(i)
+            bool takeHigh = direction == 1 ? item.m.high > merged.m.high : item.m.high < merged.m.high
+            bool takeLow = direction == 1 ? item.m.low > merged.m.low : item.m.low < merged.m.low
+            if takeHigh
+                merged.m.high := item.m.high
+                merged.high_index := item.high_index
+                merged.high_time := item.high_time
+            if takeLow
+                merged.m.low := item.m.low
+                merged.low_index := item.low_index
+                merged.low_time := item.low_time
+            merged.m.end_index := item.m.end_index
+            merged.m.end_time := item.m.end_time
+            merged.m.bar_index := item.m.bar_index
+            merged.m.timestamp := item.m.timestamp
+            merged.raw_count += item.raw_count
+    merged
+
+method ingest(InclusionEngine self, ChanBar raw) =>
+    ChanBar event = na
+    if na(self.tail)
+        self.tail := f_barCopy(raw)
+        self.tail.m.id := self.next_id
+        if removeInclusion
+            self.unresolved.push(f_barCopy(raw))
+        self.next_id += 1
+    else
+        ChanBar tail = self.tail
+        bool contains = f_contains(tail.m.high, tail.m.low, raw.m.high, raw.m.low)
+        if removeInclusion and contains and self.direction == 0
+            self.unresolved.push(f_barCopy(raw))
+            self.tail := f_barCopy(raw)
+            self.tail.m.id := tail.m.id
+        else if removeInclusion and contains
+            bool takeHigh = self.direction == 1 ? raw.m.high > tail.m.high : raw.m.high < tail.m.high
+            bool takeLow = self.direction == 1 ? raw.m.low > tail.m.low : raw.m.low < tail.m.low
+            if takeHigh
+                tail.m.high := raw.m.high
+                tail.high_index := raw.high_index
+                tail.high_time := raw.high_time
+            if takeLow
+                tail.m.low := raw.m.low
+                tail.low_index := raw.low_index
+                tail.low_time := raw.low_time
+            tail.m.end_index := raw.m.end_index
+            tail.m.end_time := raw.m.end_time
+            tail.m.bar_index := raw.m.bar_index
+            tail.m.timestamp := raw.m.timestamp
+            tail.raw_count += 1
+            self.skipped += 1
+        else
+            int rel = f_relation(tail.m.high, tail.m.low, raw.m.high, raw.m.low)
+            self.direction := rel == 0 ? self.direction : rel
+            bool resolving = removeInclusion and self.unresolved.size() > 0
+            event := resolving ? self.resolvePrefix(self.direction) : f_barCopy(tail)
+            if resolving
+                self.skipped += math.max(0, self.unresolved.size() - 1)
+                self.unresolved.clear()
+            if resolving and f_contains(event.m.high, event.m.low, raw.m.high, raw.m.low)
+                bool takeHigh = self.direction == 1 ? raw.m.high > event.m.high : raw.m.high < event.m.high
+                bool takeLow = self.direction == 1 ? raw.m.low > event.m.low : raw.m.low < event.m.low
+                if takeHigh
+                    event.m.high := raw.m.high
+                    event.high_index := raw.high_index
+                    event.high_time := raw.high_time
+                if takeLow
+                    event.m.low := raw.m.low
+                    event.low_index := raw.low_index
+                    event.low_time := raw.low_time
+                event.m.end_index := raw.m.end_index
+                event.m.end_time := raw.m.end_time
+                event.m.bar_index := raw.m.bar_index
+                event.m.timestamp := raw.m.timestamp
+                event.m.direction := self.direction
+                event.raw_count += 1
+                self.skipped += 1
+                self.tail := event
+                event := na
+            else
+                event.m.confirmed := true
+                event.m.confirmed_at_index := raw.m.bar_index
+                event.m.confirmed_at_time := raw.m.end_time
+                event.m.direction := tail.m.direction == 0 ? self.direction : tail.m.direction
+                self.total += 1
+                self.tail := f_barCopy(raw)
+                self.tail.m.id := self.next_id
+                self.tail.m.direction := self.direction
+                self.next_id += 1
+    event
+
+// Phase 2: only three FROZEN ChanBars create a frozen Fractal.
+type Fractal
+    Meta m
+    int kind = 0
+    int center_seq = 0
+    int left_seq = 0
+    int right_seq = 0
+    float price = na
+
+type FractalEngine
+    array<ChanBar> recent
+    int next_id = 0
+    int total = 0
+
+f_makeFractal(ChanBar a, ChanBar b, ChanBar c, int id, bool confirmed) =>
+    int kind = f_fractalKind(a.m.high, a.m.low, b.m.high, b.m.low, c.m.high, c.m.low, strictFractal)
+    Fractal result = na
+    if kind != 0
+        int ix = kind == 1 ? b.high_index : b.low_index
+        int ts = kind == 1 ? b.high_time : b.low_time
+        float price = kind == 1 ? b.m.high : b.m.low
+        Meta m = Meta.new(id, ix, ts, b.m.high, b.m.low, kind, confirmed, a.m.start_index, c.m.end_index, a.m.start_time, c.m.end_time, confirmed ? bar_index : na, confirmed ? (na(time_close) ? time : time_close) : na)
+        result := Fractal.new(m, kind, b.m.id, a.m.id, c.m.id, price)
+    result
+
+method onBar(FractalEngine self, ChanBar value) =>
+    self.recent.push(value)
+    if self.recent.size() > 3
+        self.recent.shift()
+    Fractal result = na
+    if self.recent.size() == 3
+        result := f_makeFractal(self.recent.get(0), self.recent.get(1), self.recent.get(2), self.next_id, true)
+        if not na(result)
+            self.next_id += 1
+            self.total += 1
+    result
+
+method previewFractal(FractalEngine self, ChanBar tail) =>
+    Fractal result = na
+    int n = self.recent.size()
+    if n >= 2 and not na(tail)
+        result := f_makeFractal(self.recent.get(n - 2), self.recent.get(n - 1), tail, self.next_id, false)
+    result
+
+// Phase 3: one mutable pen. A valid reverse pen locks its predecessor.
+type Stroke
+    Leg leg
+    int start_fractal = 0
+    int end_fractal = 0
+
+type StrokeEngine
+    Fractal anchor
+    Fractal tip
+    Leg preview
+    int next_id = 0
+    int total = 0
+    string reason = "等待起始分型"
+
+f_validStroke(Fractal a, Fractal b) =>
+    bool valid = false
+    if not na(a) and not na(b)
+        int distance = b.center_seq - a.center_seq
+        int floorDistance = strokeMode == "严格笔" ? 4 : 3
+        int requested = math.max(floorDistance, minBars - 1)
+        bool alternating = a.kind != b.kind
+        bool nonSharing = b.left_seq > a.right_seq
+        bool ordered = a.kind == -1 ? b.price > a.price : b.price < a.price
+        bool rawSpan = strokeMode == "严格笔" or b.m.bar_index - a.m.bar_index + 1 >= 5
+        valid := alternating and nonSharing and ordered and distance >= requested and rawSpan
+    valid
+
+f_strokeLeg(Fractal a, Fractal b, int id, bool confirmed) =>
+    Meta m = f_meta(id, a.m.bar_index, a.m.timestamp, b.m.bar_index, b.m.timestamp, a.price, b.price, confirmed)
+    string reason = "F" + str.tostring(a.m.id) + "→F" + str.tostring(b.m.id) + " CB=" + str.tostring(b.center_seq - a.center_seq + 1) + " no shared CB; " + strokeMode
+    Leg.new(m, a.price, b.price, a.m.id, b.m.id, b.center_seq - a.center_seq + 1, Momentum.new(), reason)
+
+method onFractal(StrokeEngine self, Fractal f) =>
+    Leg frozen = na
+    if na(self.anchor)
+        self.anchor := f
+    else if na(self.tip)
+        if f.kind == self.anchor.kind
+            bool extreme = f.kind == 1 ? f.price > self.anchor.price : f.price < self.anchor.price
+            if extreme
+                self.anchor := f
+        else if f_validStroke(self.anchor, f)
+            self.tip := f
+        else
+            self.reason := "笔等待：分型间距/不共用/价格方向未满足"
+    else if f.kind == self.tip.kind
+        bool extreme = f.kind == 1 ? f.price > self.tip.price : f.price < self.tip.price
+        if extreme and f_validStroke(self.anchor, f)
+            self.tip := f
+    else if f_validStroke(self.tip, f)
+        frozen := f_strokeLeg(self.anchor, self.tip, self.next_id, true)
+        self.next_id += 1
+        self.total += 1
+        self.anchor := self.tip
+        self.tip := f
+    if not na(self.anchor) and not na(self.tip)
+        self.preview := f_strokeLeg(self.anchor, self.tip, self.next_id, false)
+        self.reason := "候选笔，等待合格反向笔；" + self.preview.reason
+    frozen

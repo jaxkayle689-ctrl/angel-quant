@@ -1,0 +1,157 @@
+// Shared bounded renderer. Reusing the oldest slot is display pruning only.
+type LinePool
+    array<line> ids
+    int cursor = 0
+    int capacity = 360
+
+type MarkPool
+    array<string> keys
+    array<label> ids
+    int cursor = 0
+    int capacity = 400
+
+type RangePool
+    array<string> keys
+    array<box> ids
+    int cursor = 0
+    int capacity = 160
+
+f_newLinePool() =>
+    LinePool.new(array.new<line>(), 0, 360)
+
+f_newMarkPool() =>
+    MarkPool.new(array.new<string>(), array.new<label>(), 0, 400)
+
+f_newRangePool(int capacity) =>
+    RangePool.new(array.new<string>(), array.new<box>(), 0, capacity)
+
+method leg(LinePool self, Leg value, bool segment) =>
+    line obj = na
+    if self.ids.size() < self.capacity
+        obj := line.new(value.m.start_time, value.start_price, value.m.end_time, value.end_price, xloc = xloc.bar_time)
+        self.ids.push(obj)
+    else
+        obj := self.ids.get(self.cursor)
+        self.cursor := (self.cursor + 1) % self.capacity
+    line.set_xy1(obj, value.m.start_time, value.start_price)
+    line.set_xy2(obj, value.m.end_time, value.end_price)
+    line.set_width(obj, segment ? segmentWidth : strokeWidth)
+    line.set_color(obj, segment ? segmentColor : monochrome ? strokeColor : value.m.direction == 1 ? riseColor : fallColor)
+    line.set_style(obj, line.style_solid)
+    obj
+
+method mark(MarkPool self, string key, int ts, float price, string caption, string tooltip, color ink, bool above, Life state) =>
+    int slot = self.keys.indexof(key)
+    label obj = na
+    if slot >= 0
+        obj := self.ids.get(slot)
+    else if self.ids.size() < self.capacity
+        obj := label.new(ts, price, "", xloc = xloc.bar_time)
+        self.ids.push(obj)
+        self.keys.push(key)
+    else
+        slot := self.cursor
+        obj := self.ids.get(slot)
+        self.keys.set(slot, key)
+        self.cursor := (self.cursor + 1) % self.capacity
+    label.set_xy(obj, ts, price)
+    label.set_text(obj, caption)
+    label.set_tooltip(obj, tooltip)
+    label.set_style(obj, above ? label.style_label_down : label.style_label_up)
+    label.set_color(obj, color.new(ink, math.max(color.t(ink), state == Life.candidate ? 82 : state == Life.invalidated ? 92 : 10)))
+    label.set_textcolor(obj, state == Life.confirmed ? color.new(color.white, color.t(ink)) : ink)
+    label.set_size(obj, labelSize)
+    obj
+
+method erase(MarkPool self, string key) =>
+    int slot = self.keys.indexof(key)
+    if slot >= 0
+        // Keep the object ID available for pool reuse, with empty caption/coordinates.
+        label obj = self.ids.get(slot)
+        label.set_text(obj, "")
+        label.set_xy(obj, time, na)
+    0
+
+method drawRange(RangePool self, string key, int startTime, int endTime, float hi, float lo, color ink, string caption, bool confirmed) =>
+    int slot = self.keys.indexof(key)
+    box obj = na
+    if slot >= 0
+        obj := self.ids.get(slot)
+    else if self.ids.size() < self.capacity
+        obj := box.new(startTime, hi, endTime, lo, xloc = xloc.bar_time)
+        self.ids.push(obj)
+        self.keys.push(key)
+    else
+        slot := self.cursor
+        obj := self.ids.get(slot)
+        self.keys.set(slot, key)
+        self.cursor := (self.cursor + 1) % self.capacity
+    box.set_lefttop(obj, startTime, hi)
+    box.set_rightbottom(obj, endTime, lo)
+    box.set_border_color(obj, color.new(ink, confirmed ? 15 : 60))
+    box.set_border_style(obj, confirmed ? line.style_solid : line.style_dashed)
+    box.set_bgcolor(obj, color.new(ink, confirmed ? pivotAlpha : 95))
+    box.set_text(obj, caption)
+    box.set_text_size(obj, size.tiny)
+    box.set_text_color(obj, ink)
+    obj
+
+f_pivotText(ZhongShu z, int level) =>
+    string name = level == 1 ? "ZS-BI-" : "ZS-SEG-"
+    string normal = showBounds ? name + str.tostring(z.m.id) + "\nZG " + f_num(z.zg) + " / ZD " + f_num(z.zd) : ""
+    debug ? normal + "\nGG " + f_num(z.gg) + " / DD " + f_num(z.dd) + "\n" + str.tostring(z.state) : normal
+
+f_drawPivot(RangePool pool, ZhongShu z, int level) =>
+    if not na(z)
+        color ink = level == 1 ? lowPivotColor : highPivotColor
+        pool.drawRange("ZS" + str.tostring(level) + ":" + str.tostring(z.m.id), z.m.start_time, z.m.end_time, z.zg, z.zd, ink, f_pivotText(z, level), z.m.confirmed)
+    0
+
+f_drawPivots(RangePool pool, PivotEngine engine) =>
+    int n = engine.history.size()
+    if n > 0
+        f_drawPivot(pool, engine.history.get(n - 1), engine.level)
+    if not na(engine.active)
+        f_drawPivot(pool, engine.active, engine.level)
+    0
+
+f_eventKey(Event e) =>
+    e.kind + ":" + str.tostring(e.level) + ":" + str.tostring(e.source_id)
+
+f_renderEvent(MarkPool pool, Event e, int bigDirection) =>
+    bool isSignal = e.kind == "signal"
+    bool isDiv = e.kind == "divergence"
+    bool classOn = e.signal_class == 1 ? showClass1 : e.signal_class == 2 ? showClass2 : showClass3
+    bool visible = (isSignal and classOn or isDiv and showDivergence) and enableSignals
+    if e.state == Life.candidate and not showCandidateSignals
+        visible := false
+    string key = f_eventKey(e)
+    if e.state == Life.invalidated and not showInvalidated
+        pool.erase(key)
+    else if visible
+        string prefix = e.level == 1 ? lowPrefix : highPrefix
+        string caption = isDiv ? prefix + " DIV" : prefix + str.tostring(e.signal_class) + (e.side == 1 ? "B" : "S")
+        caption := e.state == Life.candidate ? "○ " + caption : e.state == Life.invalidated ? "X " + caption : caption
+        color ink = e.side == 1 ? (e.signal_class == 2 ? buy2Color : buyColor) : (e.signal_class == 2 ? sell2Color : sellColor)
+        if trendFilter and bigDirection != 0 and e.side != bigDirection
+            ink := color.new(ink, 65)
+        string evidence = e.reason + "\n" + str.tostring(e.state) + "\nendpoint index=" + str.tostring(e.index) + "\nevidence index=" + str.tostring(bar_index) + " / " + str.format_time(time, "yyyy-MM-dd HH:mm")
+        pool.mark(key, e.ts, e.price, caption, evidence, ink, e.side == -1, e.state)
+    0
+
+f_setPreviewLine(line obj, Leg value, bool visible, bool segment) =>
+    if visible and not na(value)
+        line.set_xy1(obj, value.m.start_time, value.start_price)
+        line.set_xy2(obj, value.m.end_time, value.end_price)
+        line.set_color(obj, color.new(segment ? segmentColor : monochrome ? strokeColor : value.m.direction == 1 ? riseColor : fallColor, 45))
+        line.set_width(obj, segment ? segmentWidth : strokeWidth)
+        line.set_style(obj, line.style_dashed)
+    else
+        line.set_xy1(obj, time, na)
+        line.set_xy2(obj, time, na)
+    0
+
+f_cell(table t, int row, string title, string value, bool warning = false) =>
+    table.cell(t, 0, row, title, text_color = color.white, bgcolor = color.new(color.navy, 15), text_size = size.small)
+    table.cell(t, 1, row, value, text_color = warning ? color.orange : color.white, bgcolor = color.new(color.black, 20), text_size = size.small)
+    0
